@@ -1,0 +1,20 @@
+# Cloudflare Worker (Static Assets) — serves the Vite SPA build. Assets-only,
+# no server script: CF's Workers-Assets platform (the successor to Pages) hosts
+# dist/ directly, with SPA fallback so client routes resolve to index.html.
+# Deploy: run the protected `deploy` GitHub Actions workflow manually.
+name = "pioneer-studio"
+compatibility_date = "2026-01-01"
+
+# Public URL: studio.pioneers.dev (custom domain on the pioneers.dev CF zone).
+# wrangler provisions the DNS record + edge cert on deploy. The *.workers.dev
+# URL is disabled — studio.pioneers.dev is the only public host.
+routes = [
+  { pattern = "studio.pioneers.dev", custom_domain = true }
+]
+
+[assets]
+directory = "./dist"
+not_found_handling = "single-page-application"
+
+# Custom domain is set once in the CF dashboard (Workers → pioneer-studio →
+# Domains & Routes → add studio.pioneers.dev). The *.workers.dev URL is intentionally off.

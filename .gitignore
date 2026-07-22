@@ -1,0 +1,62 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+.wrangler
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Local credentials and overrides. The application never requires these.
+.env
+.env.*
+.dev.vars
+.npmrc
+.bunfig.toml
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+credentials
+credentials.*
+secrets
+secrets.*
+
+# Agent/LLM scratch space. Public guidance lives in AGENTS.md; working notes,
+# plans, prompts, handoffs, and chain-of-thought never belong in git.
+.agents/
+.claude/
+.codex/
+.work/
+docs/
+notes/
+planning/
+thinking/
+scratch/
+
+# Vendored research repositories and locally imported actors.
+vendor/
+public/models/*
+!public/models/gnm-head.glb
+
+# Deterministically copied from the locked three package by `bun run setup`.
+public/decoders/

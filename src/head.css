@@ -1,0 +1,165 @@
+/* HeadView — designable GNM head wired to Pioneer STT/lore/TTS */
+.head-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: radial-gradient(60% 60% at 50% 40%, #142a20, #070f0c 75%);
+}
+.head-stage,
+.head-stage canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.head-panel {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  width: 208px;
+  max-height: calc(100% - 28px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(8, 18, 13, 0.82);
+  border: 1px solid rgba(127, 174, 143, 0.22);
+  backdrop-filter: blur(6px);
+  font-size: 12px;
+}
+.hp-title {
+  color: #7fae8f;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 10px;
+  margin-top: 4px;
+}
+.hp-slider {
+  display: grid;
+  grid-template-columns: 76px 1fr;
+  align-items: center;
+  gap: 8px;
+  color: #c8dcc2;
+}
+.hp-slider input {
+  width: 100%;
+  accent-color: #d8b25a;
+}
+.hp-persona {
+  width: 100%;
+  resize: vertical;
+  border-radius: 8px;
+  border: 1px solid rgba(127, 174, 143, 0.28);
+  background: rgba(12, 26, 18, 0.8);
+  color: #dceedd;
+  font: inherit;
+  padding: 6px 8px;
+}
+
+.head-convo {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  top: 14px;
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(8, 18, 13, 0.82);
+  border: 1px solid rgba(127, 174, 143, 0.22);
+  backdrop-filter: blur(6px);
+  font-size: 12.5px;
+}
+.hc-log {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.hc-turn {
+  color: #dceedd;
+  line-height: 1.45;
+}
+.hc-turn b {
+  color: #7fae8f;
+  font-weight: 600;
+  margin-right: 4px;
+}
+.hc-turn.head b {
+  color: #d8b25a;
+}
+.hc-hint {
+  color: #7fae8f;
+  opacity: 0.75;
+}
+.hc-status {
+  color: #d8b25a;
+}
+.hc-status.bad {
+  color: #e08a7a;
+}
+.hc-input {
+  display: flex;
+  gap: 8px;
+}
+.hc-input input {
+  flex: 1;
+  min-width: 0;
+  border-radius: 8px;
+  border: 1px solid rgba(127, 174, 143, 0.28);
+  background: rgba(12, 26, 18, 0.8);
+  color: #dceedd;
+  font: inherit;
+  padding: 5px 9px;
+}
+
+.hp-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.hp-load {
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 8px;
+}
+.hp-model-actions { display: flex; gap: 4px; }
+.hp-send { width: 100%; color: #d8b25a; border-color: rgba(216, 178, 90, 0.35); }
+.hp-rig {
+  color: #7fae8f;
+  font-size: 11px;
+  line-height: 1.35;
+  padding-bottom: 2px;
+}
+.hp-rig.mute {
+  color: #e0a87a;
+}
+.hp-rig b {
+  color: #dceedd;
+}
+
+/* Persona/Voice are fixed-size controls: without this they are flex items in a
+   scrolling column and collapse to nothing as soon as the slider list is long
+   (an authored VRM exports 90+ shapes, which squashed them to 14px). */
+.head-panel > * {
+  flex-shrink: 0;
+}
+.hp-sliders {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  overflow-y: auto;
+  max-height: 34vh;
+  padding-right: 2px;
+}
+
+/* Conversation button: on = mic open, hot = the VAD is hearing you right now. */
+.hc-input .sp-btn.on { border-color: #c9a227; color: #f4e7bd; }
+.hc-input .sp-btn.hot { background: #c9a227; color: #16180f; }
