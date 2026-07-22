@@ -30,8 +30,8 @@ bun run dev
 ```
 
 Open `http://localhost:5173`, then connect a browser wallet or paste your own
-Pioneer API key. Credentials are entered at runtime and kept in session storage;
-they are never bundled into the application.
+Pioneer API key. Credentials are entered at runtime, held only in page memory,
+and discarded on reload or sign-out; they are never bundled or persisted.
 
 `bun run setup` verifies the bundled GNM head and copies the Draco/KTX2 runtime
 decoders from the locked `three` dependency. The normal dev, test, and build

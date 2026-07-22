@@ -14,7 +14,7 @@ const mem = new Map<string, string>();
 const { beatReadiness, boardReadiness, bandOf } = await import("./readiness");
 const { buildFinalPrompt, emptyExt, pickModel } = await import("./pipeline");
 const { promptPackMarkdown, shotBible } = await import("./promptPack");
-const { solveCameraMotion, describeCameraMove } = await import("./cameraSolve");
+const { solveCameraMotion, describeCameraMove, normalizeReferenceVideoUrl } = await import("./cameraSolve");
 const { kindOf } = await import("./shared");
 const { consumeCharacter, loadHeadCharacter, rememberHeadCharacter, sendCharacter } = await import("./characterHandoff");
 const { consumeStudioAssets, queueStudioAsset } = await import("./studioHandoff");
@@ -22,6 +22,13 @@ const { injectRefs } = await import("./copilot");
 type Shot = import("./api").Shot;
 type Pipeline = import("./pipeline").Pipeline;
 type GrayFrame = import("./cameraSolve").GrayFrame;
+
+test("reference video URLs reject executable and non-video schemes", () => {
+  expect(normalizeReferenceVideoUrl("https://media.example/take.webm")).toBe("https://media.example/take.webm");
+  expect(normalizeReferenceVideoUrl("data:video/webm;base64,AAAA")).toStartWith("data:video/webm");
+  expect(() => normalizeReferenceVideoUrl("javascript:alert(1)")).toThrow("unsupported reference clip URL");
+  expect(() => normalizeReferenceVideoUrl("data:text/html,<script>alert(1)</script>")).toThrow("reference clip is not a video");
+});
 
 test("VRMs are models and character handoffs carry identity, persona, and voice", () => {
   expect(kindOf("model/vrm", "ranger.vrm")).toBe("model");

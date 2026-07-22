@@ -21,4 +21,4 @@ Security fixes target the current `master` branch and the hosted application at
 Pioneer Studio is a public browser client. Every browser, fork, and API caller is
 untrusted. Authentication, authorization, ownership, rate limits, and credit
 metering must be enforced by the Pioneer API. API credentials are supplied by the
-user at runtime and stored only for the browser session.
+user at runtime, held only in page memory, and discarded on reload or sign-out.

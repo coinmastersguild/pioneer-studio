@@ -53,7 +53,7 @@ agents and for people using LLMs to contribute.
   server; client-side checks are user experience, not security controls.
 - The application has a zero-env, Pioneer-hosted default. Forks may modify source,
   but upstream code must not grow environment-specific branches.
-- Browser credentials are session-only. Never log them, place them in URLs, send
-  them to third parties, or persist them in local storage.
+- Browser credentials are memory-only. Never log them, place them in URLs, send
+  them to third parties, or persist them in browser storage.
 - Large generated files stay out of git. The only tracked runtime model is the
   verified GNM head documented in `THIRD_PARTY_NOTICES.md`.

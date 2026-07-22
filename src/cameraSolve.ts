@@ -291,29 +291,51 @@ export function describeCameraMove(s: CamSolve["summary"]): string {
 }
 
 /* ── DOM side: sample a video file/url into gray frames ── */
+export function normalizeReferenceVideoUrl(src: string, base = "https://studio.pioneers.dev/"): string {
+  const source = new URL(src, base);
+  if (!["https:", "http:", "blob:", "data:"].includes(source.protocol)) {
+    throw new Error("unsupported reference clip URL");
+  }
+  if (source.protocol === "data:" && !source.href.toLowerCase().startsWith("data:video/")) {
+    throw new Error("reference clip is not a video");
+  }
+  return source.href;
+}
+
+async function fetchVideoBlob(src: string): Promise<Blob> {
+  const source = normalizeReferenceVideoUrl(src, location.href);
+  const response = await fetch(source);
+  if (!response.ok) throw new Error(`could not fetch reference clip (${response.status})`);
+  const blob = await response.blob();
+  if (blob.type && !blob.type.startsWith("video/") && blob.type !== "application/octet-stream") {
+    throw new Error("reference clip is not a video");
+  }
+  return blob;
+}
+
 export async function extractGrayFrames(src: File | string, opts?: { fps?: number; maxSeconds?: number }): Promise<{ frames: GrayFrame[]; fps: number }> {
   const fps = opts?.fps ?? 6;
   const maxSeconds = opts?.maxSeconds ?? 8;
-  const url = typeof src === "string" ? src : URL.createObjectURL(src);
+  const sourceBlob = typeof src === "string" ? await fetchVideoBlob(src) : src;
+  const url = URL.createObjectURL(sourceBlob);
   const video = document.createElement("video");
   video.muted = true;
   video.playsInline = true;
-  video.crossOrigin = "anonymous";
-  video.src = url;
-  await new Promise<void>((res, rej) => {
-    video.onloadedmetadata = () => res();
-    video.onerror = () => rej(new Error("could not load reference clip"));
-  });
-  const dur = Math.min(video.duration || maxSeconds, maxSeconds);
-  const scale = ANALYSIS_W / Math.max(video.videoWidth, 1);
-  const w = Math.max(16, Math.round(video.videoWidth * scale));
-  const h = Math.max(16, Math.round(video.videoHeight * scale));
-  const cv = document.createElement("canvas");
-  cv.width = w;
-  cv.height = h;
-  const ctx = cv.getContext("2d", { willReadFrequently: true })!;
-  const frames: GrayFrame[] = [];
   try {
+    video.src = url;
+    await new Promise<void>((res, rej) => {
+      video.onloadedmetadata = () => res();
+      video.onerror = () => rej(new Error("could not load reference clip"));
+    });
+    const dur = Math.min(video.duration || maxSeconds, maxSeconds);
+    const scale = ANALYSIS_W / Math.max(video.videoWidth, 1);
+    const w = Math.max(16, Math.round(video.videoWidth * scale));
+    const h = Math.max(16, Math.round(video.videoHeight * scale));
+    const cv = document.createElement("canvas");
+    cv.width = w;
+    cv.height = h;
+    const ctx = cv.getContext("2d", { willReadFrequently: true })!;
+    const frames: GrayFrame[] = [];
     for (let t = 0; t <= dur; t += 1 / fps) {
       await new Promise<void>((res, rej) => {
         video.onseeked = () => res();
@@ -323,10 +345,12 @@ export async function extractGrayFrames(src: File | string, opts?: { fps?: numbe
       ctx.drawImage(video, 0, 0, w, h);
       frames.push(toGray(ctx.getImageData(0, 0, w, h)));
     }
+    return { frames, fps };
   } finally {
-    if (typeof src !== "string") URL.revokeObjectURL(url);
+    video.removeAttribute("src");
+    video.load();
+    URL.revokeObjectURL(url);
   }
-  return { frames, fps };
 }
 
 // One-call helper for the Beat Dialog: reference clip → prompt-ready camera line.

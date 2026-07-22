@@ -68,7 +68,7 @@ type PendingAgentTurn = { turn: StudioAgentTurn; completed: StudioActionResult[]
 const MODE_LABEL: Record<Mode, string> = { chat: "chat", board: "storyboard", create: "create", animate: "animation", head: "talking head", studio: "studio", media: "media", models: "models", projects: "projects", companies: "companies", settings: "settings" };
 
 function App() {
-  const [apiKey, setApiKey] = useState(() => sessionStorage.getItem("pioneer_studio_api_key") || "");
+  const [apiKey, setApiKey] = useState("");
   const [wallet, setWallet] = useState(() => localStorage.getItem("pioneer_studio_wallet") || "");
   const [mode, setMode] = useState<Mode>("chat");
   const [models, setModels] = useState<JobModel[]>([]);
@@ -115,13 +115,13 @@ function App() {
   // only fires until it succeeds (Settings writes apiKey on every keystroke).
   const deepLinkedProject = useRef(new URLSearchParams(location.search).get("project"));
 
+  // Purge credentials persisted by older builds. Credentials now stay only in
+  // React memory and disappear on reload or sign-out. The wallet address is
+  // public and may remain remembered.
   useEffect(() => {
-    sessionStorage.setItem("pioneer_studio_api_key", apiKey);
-  }, [apiKey]);
-
-  // Migrate away from older builds that persisted bearer credentials beyond the
-  // browser session. The wallet address is public and may remain remembered.
-  useEffect(() => localStorage.removeItem("pioneer_studio_api_key"), []);
+    localStorage.removeItem("pioneer_studio_api_key");
+    sessionStorage.removeItem("pioneer_studio_api_key");
+  }, []);
 
   // Invite link (/?join=<companyAddress>) opens the Companies page, which
   // handles the actual join request once a credential is present.
