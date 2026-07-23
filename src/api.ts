@@ -94,18 +94,6 @@ export async function fetchCompanyLeaderboard(): Promise<CompanyLeaderboardEntry
   return (await res.json()).companies ?? [];
 }
 
-// Create a named test company. It grants no credits; the caller becomes owner.
-export async function createTestCompany(apiKey: string, name: string): Promise<{ companyAddress: string; slug: string }> {
-  const res = await fetch(`${API_BASE}/api/v1/companies/create-test`, {
-    method: "POST",
-    headers: { ...authHeaders(apiKey), "content-type": "application/json" },
-    body: JSON.stringify({ name }),
-  });
-  const body = await res.json();
-  if (!res.ok) throw new Error(body?.error || `create-test: ${res.status}`);
-  return body;
-}
-
 // Request to join — creates a pending request the owner must approve.
 export async function joinCompany(apiKey: string, companyAddress: string): Promise<{ status: string }> {
   const res = await fetch(`${API_BASE}/api/v1/companies/join`, {

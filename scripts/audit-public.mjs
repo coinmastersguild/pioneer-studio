@@ -26,6 +26,7 @@ const contentRules = [
   ["private server identifier", new RegExp("pioneer" + "-server", "gi")],
   ["private inference hostname", new RegExp("inference\\." + "pioneers\\.dev", "gi")],
   ["private configuration name", new RegExp("MESHY" + "_API", "g")],
+  ["private test route", new RegExp("/api/v1/companies/create" + "-test", "g")],
   ["private planning identifier", /\b(?:SPEC|EPIC)-\d+\b/g],
   ["private development shorthand", new RegExp("pony" + "tail", "gi")],
   ["private key", new RegExp("-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE" + " KEY-----", "g")],

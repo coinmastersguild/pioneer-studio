@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import {
   API_BASE,
-  createTestCompany,
   fetchCompanyLeaderboard,
   joinCompany,
   listMyCompanies,
@@ -19,7 +18,6 @@ export default function CompaniesView({ ps }: { ps: PS }) {
   const [roles, setRoles] = useState<Record<string, string>>({}); // companyAddress → my role
   const [err, setErr] = useState("");
   const [pending, setPending] = useState<Record<string, boolean>>({}); // addr → request sent this session
-  const [newName, setNewName] = useState("");
 
   async function refresh() {
     setErr("");
@@ -77,18 +75,6 @@ export default function CompaniesView({ ps }: { ps: PS }) {
     }
   }
 
-  async function createTest() {
-    if (!newName.trim()) return;
-    try {
-      await createTestCompany(ps.apiKey, newName.trim());
-      setNewName("");
-      ps.toast(`Company "${newName.trim()}" created`, "gold");
-      refresh();
-    } catch (e: any) {
-      ps.toast(String(e.message || e));
-    }
-  }
-
   function copyInvite(addr: string) {
     const link = `${location.origin}/?join=${addr}`;
     if (!navigator.clipboard) {
@@ -112,20 +98,6 @@ export default function CompaniesView({ ps }: { ps: PS }) {
       </div>
       {err && <p style={{ color: "#f88" }}>{err}</p>}
       {!ps.apiKey && <p style={{ opacity: 0.6, fontSize: 13 }}>Connect your wallet to join a company or manage your own.</p>}
-
-      {/* No-burn test create — spin up a named company you own to test with */}
-      {ps.apiKey && (
-        <div style={{ display: "flex", gap: 8, marginTop: 12, alignItems: "center" }}>
-          <input
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && createTest()}
-            placeholder="Test company name (e.g. Blockwire)…"
-            style={{ background: "#0e1a14", border: "1px solid #1e3a2a", color: "#e8f0ea", borderRadius: 8, padding: "8px 10px", fontSize: 14, minWidth: 260 }}
-          />
-          <button type="button" className="pill on" onClick={createTest} disabled={!newName.trim()}>Create (test, no burn)</button>
-        </div>
-      )}
 
       <div style={{ display: "grid", gap: 6, marginTop: 16 }}>
         {rows.length === 0 && <p style={{ opacity: 0.4 }}>No companies yet.</p>}
