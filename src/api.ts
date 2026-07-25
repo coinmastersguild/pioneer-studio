@@ -139,38 +139,66 @@ export async function deleteProject(apiKey: string, id: string): Promise<void> {
   if (!res.ok) throw new Error(`delete project: ${res.status}`);
 }
 
-// Mobile Safari and Chrome never expose an injected provider — MetaMask only
-// injects inside its own in-app browser — so the sign-in flow has to hand the
-// page over to that browser first.
-//
-// This has to be a link the user actually taps. iOS only hands a universal
-// link to the native app when the navigation comes from a real user gesture;
-// assigning location.href is treated as untrusted and silently loads the web
-// fallback instead, which is why a programmatic redirect never opened the app.
-export function needsMetaMaskHandoff(): boolean {
-  return (
-    !(window as unknown as { ethereum?: unknown }).ethereum &&
-    window.matchMedia("(pointer: coarse)").matches
-  );
+type EthProvider = { request(a: { method: string; params?: unknown[] }): Promise<any> };
+
+function injectedProvider(): EthProvider | undefined {
+  return (window as unknown as { ethereum?: EthProvider }).ethereum;
 }
 
-// link.metamask.io is the current deeplink host; metamask.app.link is the
-// legacy Branch domain. Deliberate ceiling: MetaMask only — other mobile
-// wallets need WalletConnect, a dependency worth adding once one is required.
-export function metamaskDappLink(): string {
-  return `https://link.metamask.io/dapp/${location.host}${location.pathname}${location.search}`;
+// Mobile Safari and Chrome never expose an injected provider — MetaMask only
+// injects inside its own in-app browser.
+export function needsMetaMaskHandoff(): boolean {
+  return !injectedProvider() && window.matchMedia("(pointer: coarse)").matches;
+}
+
+// On mobile the SDK, not a deeplink, is what makes signing work. A deeplink is
+// one-way: it can open MetaMask but has no channel to return a signature, so
+// the best it could ever do was strand the user in a second browser. The SDK
+// holds a session with the app, so the user signs in MetaMask and comes back
+// here with the result.
+//
+// Imported on demand. The desktop extension path never loads it, and Vite
+// keeps it in its own chunk.
+let session: Promise<EthProvider> | null = null;
+
+function metaMaskSession(): Promise<EthProvider> {
+  if (!session) {
+    session = (async () => {
+      const { MetaMaskSDK } = await import("@metamask/sdk");
+      const sdk = new MetaMaskSDK({
+        dappMetadata: { name: "Pioneer Studio", url: location.origin },
+        // deeplink straight into the app; the QR modal is a desktop affordance
+        useDeeplink: true,
+        checkInstallationImmediately: false,
+      });
+      await sdk.init();
+      const provider = sdk.getProvider();
+      if (!provider) throw new Error("Could not start a MetaMask session");
+      return provider as unknown as EthProvider;
+    })();
+    // a failed init must not poison every later attempt
+    session.catch(() => {
+      session = null;
+    });
+  }
+  return session;
+}
+
+// Warm the session before the user taps. Starting it costs a dynamic import
+// and a handshake, and spending the tap on that is what loses iOS's user
+// gesture — the tap needs to reach MetaMask, not a loading spinner.
+export function primeMetaMaskSession(): void {
+  if (needsMetaMaskHandoff()) void metaMaskSession().catch(() => {});
 }
 
 // Wallet login: challenge → personal_sign → short-lived bearer token. The exact
 // message format is part of the public API contract and must remain stable.
 export async function connectWallet(): Promise<{ token: string; address: string }> {
-  const eth = (window as unknown as { ethereum?: { request(a: { method: string; params?: unknown[] }): Promise<any> } }).ethereum;
-  if (!eth) {
-    // The handoff itself cannot happen here — see needsMetaMaskHandoff below.
-    // Callers render a real link; this only reports why signing is impossible.
-    if (needsMetaMaskHandoff()) throw new Error("Open this page in MetaMask's browser to sign in");
+  const injected = injectedProvider();
+  if (!injected && !needsMetaMaskHandoff()) {
     throw new Error("No browser wallet found — install MetaMask/KeepKey, or paste an sk-pioneer key");
   }
+  const eth = injected ?? (await metaMaskSession());
   const accounts: string[] = await eth.request({ method: "eth_requestAccounts" });
   const address = accounts[0];
   if (!address) throw new Error("Wallet returned no account");

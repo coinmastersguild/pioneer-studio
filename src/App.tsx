@@ -12,9 +12,8 @@ import {
   fetchModels,
   fetchResultUrl,
   fetchStoryboard,
-  metamaskDappLink,
-  needsMetaMaskHandoff,
   openProject,
+  primeMetaMaskSession,
   pollJob,
   restoreActiveProject,
   setSyncErrorHandler,
@@ -148,6 +147,12 @@ function App() {
   // handles the actual join request once a credential is present.
   useEffect(() => {
     if (new URLSearchParams(location.search).get("join")) setMode("companies");
+  }, []);
+
+  // No-op unless this is a mobile browser without an injected provider; there
+  // it opens the MetaMask session up front so Connect is ready on first tap.
+  useEffect(() => {
+    primeMetaMaskSession();
   }, []);
 
   useEffect(() => {
@@ -421,32 +426,10 @@ function App() {
             <img src="/compass-icon.svg" alt="" /> Pioneer <span className="sub">Studio</span>
           </div>
           <p className="gate-lede">Storyboards, 3D cutscenes and talking characters, rendered on Pioneer's GPUs.</p>
-          {needsMetaMaskHandoff() ? (
-            <a
-              className="gate-connect"
-              href={metamaskDappLink()}
-              onClick={(e) => {
-                // A provider can be injected a beat after paint. If it turned
-                // up, sign here rather than bouncing out of a browser we are
-                // already inside.
-                if ((window as unknown as { ethereum?: unknown }).ethereum) {
-                  e.preventDefault();
-                  void onConnectWallet();
-                }
-              }}
-            >
-              Open in MetaMask
-            </a>
-          ) : (
-            <button type="button" className="gate-connect" onClick={onConnectWallet}>
-              Connect wallet
-            </button>
-          )}
-          <p className="gate-note">
-            {needsMetaMaskHandoff()
-              ? "Reopens this page inside MetaMask, where it can sign — no password, nothing uploaded."
-              : "Signs a challenge in your browser wallet — no password, nothing uploaded."}
-          </p>
+          <button type="button" className="gate-connect" onClick={onConnectWallet}>
+            Connect wallet
+          </button>
+          <p className="gate-note">Signs a challenge in your wallet — no password, nothing uploaded.</p>
           <div className="gate-or">or paste a key</div>
           <input
             type="password"
