@@ -143,7 +143,20 @@ export async function deleteProject(apiKey: string, id: string): Promise<void> {
 // message format is part of the public API contract and must remain stable.
 export async function connectWallet(): Promise<{ token: string; address: string }> {
   const eth = (window as unknown as { ethereum?: { request(a: { method: string; params?: unknown[] }): Promise<any> } }).ethereum;
-  if (!eth) throw new Error("No browser wallet found — install MetaMask/KeepKey, or paste an sk-pioneer key");
+  if (!eth) {
+    // Mobile Safari/Chrome never have an injected provider: MetaMask mobile
+    // only injects into its own in-app browser, so "Connect wallet" was a dead
+    // button on every phone. Hand the page to that browser and the flow below
+    // runs there unchanged. The link degrades to MetaMask's install page when
+    // the app is absent. Deliberate ceiling: this covers MetaMask only. Other
+    // mobile wallets need WalletConnect, which is a dependency worth adding
+    // only once one is actually required.
+    if (window.matchMedia("(pointer: coarse)").matches) {
+      location.href = `https://metamask.app.link/dapp/${location.host}${location.pathname}${location.search}`;
+      throw new Error("Opening MetaMask…");
+    }
+    throw new Error("No browser wallet found — install MetaMask/KeepKey, or paste an sk-pioneer key");
+  }
   const accounts: string[] = await eth.request({ method: "eth_requestAccounts" });
   const address = accounts[0];
   if (!address) throw new Error("Wallet returned no account");

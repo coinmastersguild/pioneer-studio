@@ -1,0 +1,245 @@
+/* ===========================================================
+   Pioneer Studio — narrow-viewport layer
+
+   The desktop sheets assume a three-column shell (rail | work |
+   copilot) that needs ~420px of chrome before the work area gets a
+   pixel, so on a phone there was nothing left to render into. This
+   file is the only place with media queries; it is imported last so
+   it wins ties against the per-view sheets.
+   =========================================================== */
+
+@media (max-width: 860px) {
+  /* iOS Safari zooms the page in whenever a focused text control is
+     under 16px and never zooms back out. Every input in the app was
+     11–13px, which made a single tap on any field strand the user at
+     2x with the layout scrolled sideways. Range/checkbox/radio don't
+     trigger it and stay dense.
+     !important is load-bearing here: the per-view sheets set these sizes
+     through `font:` shorthands on id-scoped selectors that outrank any
+     reasonable element selector. */
+  input:not([type="range"]):not([type="checkbox"]):not([type="radio"]),
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+
+  /* ── Shell: three columns → topbar / work / bottom nav ── */
+  .shell {
+    --copilot-w: 0px;
+    grid-template-columns: 1fr;
+    grid-template-rows: var(--topbar-h) minmax(0, 1fr) auto;
+    grid-template-areas: "topbar" "work" "rail";
+    /* dvh, not vh: mobile 100vh sits under the browser chrome and cuts
+       off the bottom nav until the address bar collapses. */
+    height: 100dvh;
+  }
+
+  /* The rotated GitHub ribbon eats a corner the topbar needs. */
+  .fork-corner { display: none; }
+
+  /* ── Topbar ── */
+  .topbar { gap: 8px; padding: 0 10px; }
+  .topbar > div:first-child { gap: 10px !important; min-width: 0; }
+  .brand .sub { display: none; }
+  /* the mode row duplicates the bottom nav — drop the wider copy */
+  .modes { display: none; }
+  .topbar-right { padding-right: 0; gap: 6px; }
+  .topbar-right .pill { padding: 4px 9px; font-size: 11px; }
+  .topbar-right .pill .lbl { display: none; }
+  /* R2 usage is the least useful number on a phone */
+  .topbar-right .pill:nth-child(2) { display: none; }
+
+  /* ── Left rail → labelled bottom nav ── */
+  .rail {
+    flex-direction: row;
+    align-items: stretch;
+    border-right: 0;
+    border-top: 1px solid var(--border);
+    background: var(--card);
+    padding: 4px 4px calc(4px + env(safe-area-inset-bottom));
+    gap: 2px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+  .rail::-webkit-scrollbar { display: none; }
+  .rail .grow,
+  .rail-sep { display: none; }
+  .rail-btn {
+    flex: 0 0 auto;
+    width: 62px;
+    height: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    padding: 6px 2px;
+  }
+  /* the hover tooltip becomes the permanent caption */
+  .rail .rail-btn .rb-label {
+    position: static;
+    opacity: 1;
+    transform: none;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    padding: 0;
+    color: inherit;
+    font-size: 9.5px;
+    line-height: 1.2;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* ── Copilot → sheet below the topbar ──
+     Left inset at the topbar height so its toggle button stays
+     reachable and closes the sheet. Hidden state is already handled
+     by .shell.copilot-collapsed .copilot { display: none }. */
+  .copilot {
+    position: fixed;
+    inset: var(--topbar-h) 0 0 0;
+    z-index: 140;
+    border-left: 0;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .msg { max-width: 100%; }
+
+  /* ── Toasts sit above the bottom nav, not beside the copilot ── */
+  .toaster {
+    right: 12px;
+    left: 12px;
+    bottom: calc(78px + env(safe-area-inset-bottom));
+  }
+
+  /* ── Connect gate ── */
+  .gate {
+    height: 100dvh;
+    padding: 20px 16px calc(20px + env(safe-area-inset-bottom));
+    align-content: center;
+  }
+  .gate .toaster { left: 12px; right: 12px; bottom: 16px; }
+  .gate-card { padding: 28px 20px; }
+
+  /* ── Chat ── */
+  .chat-inner { padding: 20px 14px 28px; gap: 16px; }
+  .chat-hero { padding: 28px 0 18px; }
+  .starter-grid { grid-template-columns: 1fr; margin-top: 18px; }
+  .plan-row { flex-direction: column; align-items: flex-start; gap: 4px; }
+  .plan-row .k { width: auto; }
+
+  /* ── Storyboard ── */
+  .board-head { flex-wrap: wrap; gap: 8px; padding: 10px 14px; }
+  .pipeline-legend { flex-wrap: wrap; }
+  .board-sub { flex-wrap: wrap; gap: 8px; padding: 8px 14px; }
+  .board-scroll { padding: 14px 14px 24px; }
+  .beats { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  /* single unwrapped row of copy + meter + two buttons — it ran 65px past
+     the viewport before wrapping was allowed */
+  .release-bar { flex-wrap: wrap; gap: 10px; padding: 12px 14px; }
+  .release-bar .grow { display: none; }
+  .release-bar .btn { flex: 1 1 auto; justify-content: center; }
+
+  .bd-overlay { place-items: start center; padding: 12px 0 0; }
+  .beat-dialog { width: 100%; max-height: 100dvh; border-radius: 0; }
+  .bd-row { flex-direction: column; gap: 6px; padding: 10px 14px; }
+  .bd-row .k { width: auto; }
+  .bd-voice audio { max-width: 100%; }
+  .ap-chars { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+  .ap-finals { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); }
+
+  /* ── Studio: assets | canvas | inspector → one scrolling column ── */
+  #view-studio .st-app { grid-template-rows: auto minmax(0, 1fr) clamp(150px, 30dvh, 240px); }
+  /* Grid and flex items default to min-width:auto, so the timeline's
+     intrinsic width propagated up and stretched the whole view to 548px,
+     dragging the topbar and rail sideways with it. */
+  #view-studio .st-app,
+  #view-studio .st-bar,
+  #view-studio .st-mid,
+  #view-studio .timeboard,
+  #view-studio .tb-h,
+  #view-studio .tb-body { min-width: 0; }
+  #view-studio .st-app { overflow-x: hidden; }
+  #view-studio .st-bar { flex-wrap: wrap; gap: 8px; padding: 8px 10px; }
+  #view-studio .st-bar .spacer { display: none; }
+  #view-studio .st-modes { flex-wrap: wrap; }
+  #view-studio .st-mid {
+    grid-template-columns: 1fr;
+    grid-auto-rows: auto;
+    overflow-y: auto;
+  }
+  /* canvas first — it is the reason to open Studio at all */
+  #view-studio .canvas { order: -1; min-height: 34dvh; }
+  /* the flex spacer shoves the right-hand transport controls off the
+     scrollable strip; packed left they are all reachable without scrolling */
+  #view-studio .transport { height: auto; padding: 6px 10px; }
+  #view-studio .transport .gap { display: none; }
+  #view-studio .st-left,
+  #view-studio .st-insp {
+    border-left: 0;
+    border-right: 0;
+    border-top: 1px solid var(--line);
+    max-height: 42dvh;
+  }
+  #view-studio .tb-body { grid-template-columns: 116px 1fr; }
+  #view-studio .export-readiness { right: 8px; left: 8px; width: auto; }
+
+  /* ── Create ── */
+  .create-root { padding: 16px 14px 72px; }
+  .sc-grid { grid-template-columns: repeat(2, 1fr); }
+  .sc-preview img,
+  .sc-preview video { max-width: 100%; }
+  .sc-preview audio { width: 100%; }
+
+  /* ── Talking head: floating panels → stacked sheets ──
+     Both were fixed-width columns pinned to opposite edges; on a phone
+     they overlapped each other and hid the head completely. Kept tight
+     so the character — the whole point of the view — stays on screen;
+     both scroll internally. */
+  .head-panel {
+    left: 8px;
+    right: 8px;
+    top: 8px;
+    width: auto;
+    max-height: 20dvh;
+  }
+  .head-convo {
+    left: 8px;
+    right: 8px;
+    top: auto;
+    bottom: 8px;
+    width: auto;
+    height: 34dvh;
+  }
+
+  /* ── Stage ── */
+  .stage-hud { left: 8px; right: 8px; top: 8px; }
+  .stage-panel { flex-wrap: wrap; }
+  .stage-transport input[type="range"] { width: 100%; }
+  .stage-take {
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    width: auto;
+    max-height: 46dvh;
+  }
+
+  /* ── Media ── */
+  .media-wrap { padding: 14px 14px 40px; }
+  .media-head { flex-wrap: wrap; gap: 10px; }
+  .media-billing { grid-template-columns: 1fr; gap: 8px; }
+  .media-filters { flex-wrap: wrap; }
+  /* Type and Added are the droppable columns — File, Size, URL and the
+     copy button are what the table is actually for. */
+  table.files th:nth-child(2),
+  table.files td:nth-child(2),
+  table.files th:nth-child(5),
+  table.files td:nth-child(5) { display: none; }
+  table.files td,
+  table.files th { padding: 8px 6px; }
+
+  /* ── Modals ── */
+  .vrm-picker { max-height: min(620px, calc(100dvh - 48px)); }
+  .vrm-picker-backdrop { padding: 12px; }
+}

@@ -60,12 +60,30 @@ import {
   type StudioActionResult,
   type StudioAgentTurn,
 } from "./studioAgent";
+// Last import wins the cascade — the narrow-viewport layer has to override
+// every view sheet above, including the ones the view modules pull in.
+import "./mobile.css";
 
 type ThreadItem = { id: number; kind: "user" | "ai"; text: string };
 type Toast = { id: number; msg: string; kind?: "ok" | "gold"; out?: boolean };
 type PendingAgentTurn = { turn: StudioAgentTurn; completed: StudioActionResult[]; actions: PreparedStudioAction[] };
 
 const MODE_LABEL: Record<Mode, string> = { chat: "chat", board: "storyboard", create: "create", animate: "animation", head: "talking head", studio: "studio", media: "media", models: "models", projects: "projects", companies: "companies", settings: "settings" };
+
+// Mirrors the breakpoint in mobile.css. Below it the copilot is an overlay
+// sheet instead of a third column, so it is reachable from every mode — but it
+// starts closed, since open it covers the work area it is meant to act on.
+const NARROW = "(max-width: 860px)";
+function useNarrow() {
+  const [narrow, setNarrow] = useState(() => window.matchMedia(NARROW).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(NARROW);
+    const onChange = () => setNarrow(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  return narrow;
+}
 
 function App() {
   const [apiKey, setApiKey] = useState("");
@@ -76,7 +94,8 @@ function App() {
   const [board, setBoard] = useState<Storyboard | null>(null);
   const [credits, setCredits] = useState<number | null>(null);
   const [creditFlash, setCreditFlash] = useState(false);
-  const [copilotOpen, setCopilotOpen] = useState(true);
+  const narrow = useNarrow();
+  const [copilotOpen, setCopilotOpen] = useState(() => !window.matchMedia(NARROW).matches);
   const [thread, setThread] = useState<ThreadItem[]>([
     {
       id: 0,
@@ -428,7 +447,7 @@ function App() {
   }
 
   return (
-    <div className={`shell${mode === "studio" && copilotOpen ? "" : " copilot-collapsed"}`} id="shell">
+    <div className={`shell${(mode === "studio" || narrow) && copilotOpen ? "" : " copilot-collapsed"}`} id="shell">
       <a className="fork-corner" href="https://github.com/coinmastersguild/pioneer-studio/fork" target="_blank" rel="noreferrer" aria-label="Fork Pioneer Studio on GitHub">
         Fork me
       </a>
@@ -464,7 +483,7 @@ function App() {
               <b>Add key →</b>
             </button>
           )}
-          {mode === "studio" && (
+          {(mode === "studio" || narrow) && (
             <button
               type="button"
               className={`icon-btn${copilotOpen ? " on" : ""}`}
