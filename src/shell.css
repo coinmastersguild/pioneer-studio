@@ -205,12 +205,15 @@ svg.ic{ width:15px; height:15px; stroke:currentColor; stroke-width:1.5; fill:non
 .gate-card .brand{ font-size:17px; }
 .gate-card .brand img{ width:26px; height:26px; }
 .gate-lede{ margin:0; color:var(--fg3); font-size:12.5px; line-height:1.55; max-width:30ch; }
+/* also rendered as an <a> for the iOS MetaMask handoff, which only opens the
+   app when the user taps a real link — hence the block/centring resets */
 .gate-connect{
-  width:100%; margin-top:6px; padding:11px 18px; font:inherit; font-weight:650; font-size:13px; cursor:pointer;
+  display:block; width:100%; margin-top:6px; padding:11px 18px; font:inherit; font-weight:650; font-size:13px; cursor:pointer;
   background:var(--compass-400); color:#16180f; border:0; border-radius:var(--radius-md);
+  text-align:center; text-decoration:none;
   transition:filter .15s var(--ease-out);
 }
-.gate-connect:hover{ filter:brightness(1.08); }
+.gate-connect:hover{ filter:brightness(1.08); text-decoration:none; }
 .gate-note{ margin:0; color:var(--fg4); font-size:11px; line-height:1.5; }
 .gate-or{
   width:100%; display:flex; align-items:center; gap:10px; color:var(--fg3); font-size:11px; margin-top:4px;

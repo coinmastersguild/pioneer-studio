@@ -139,22 +139,36 @@ export async function deleteProject(apiKey: string, id: string): Promise<void> {
   if (!res.ok) throw new Error(`delete project: ${res.status}`);
 }
 
+// Mobile Safari and Chrome never expose an injected provider — MetaMask only
+// injects inside its own in-app browser — so the sign-in flow has to hand the
+// page over to that browser first.
+//
+// This has to be a link the user actually taps. iOS only hands a universal
+// link to the native app when the navigation comes from a real user gesture;
+// assigning location.href is treated as untrusted and silently loads the web
+// fallback instead, which is why a programmatic redirect never opened the app.
+export function needsMetaMaskHandoff(): boolean {
+  return (
+    !(window as unknown as { ethereum?: unknown }).ethereum &&
+    window.matchMedia("(pointer: coarse)").matches
+  );
+}
+
+// link.metamask.io is the current deeplink host; metamask.app.link is the
+// legacy Branch domain. Deliberate ceiling: MetaMask only — other mobile
+// wallets need WalletConnect, a dependency worth adding once one is required.
+export function metamaskDappLink(): string {
+  return `https://link.metamask.io/dapp/${location.host}${location.pathname}${location.search}`;
+}
+
 // Wallet login: challenge → personal_sign → short-lived bearer token. The exact
 // message format is part of the public API contract and must remain stable.
 export async function connectWallet(): Promise<{ token: string; address: string }> {
   const eth = (window as unknown as { ethereum?: { request(a: { method: string; params?: unknown[] }): Promise<any> } }).ethereum;
   if (!eth) {
-    // Mobile Safari/Chrome never have an injected provider: MetaMask mobile
-    // only injects into its own in-app browser, so "Connect wallet" was a dead
-    // button on every phone. Hand the page to that browser and the flow below
-    // runs there unchanged. The link degrades to MetaMask's install page when
-    // the app is absent. Deliberate ceiling: this covers MetaMask only. Other
-    // mobile wallets need WalletConnect, which is a dependency worth adding
-    // only once one is actually required.
-    if (window.matchMedia("(pointer: coarse)").matches) {
-      location.href = `https://metamask.app.link/dapp/${location.host}${location.pathname}${location.search}`;
-      throw new Error("Opening MetaMask…");
-    }
+    // The handoff itself cannot happen here — see needsMetaMaskHandoff below.
+    // Callers render a real link; this only reports why signing is impossible.
+    if (needsMetaMaskHandoff()) throw new Error("Open this page in MetaMask's browser to sign in");
     throw new Error("No browser wallet found — install MetaMask/KeepKey, or paste an sk-pioneer key");
   }
   const accounts: string[] = await eth.request({ method: "eth_requestAccounts" });
