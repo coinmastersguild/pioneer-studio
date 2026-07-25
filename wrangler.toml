@@ -1,7 +1,8 @@
 # Cloudflare Worker (Static Assets) — serves the Vite SPA build. Assets-only,
 # no server script: CF's Workers-Assets platform (the successor to Pages) hosts
 # dist/ directly, with SPA fallback so client routes resolve to index.html.
-# Deploy: run the protected `deploy` GitHub Actions workflow manually.
+# Deploy: pushing to master runs the `deploy` workflow, which waits on the
+# protected `production` environment for a reviewer to approve the release.
 name = "pioneer-studio"
 compatibility_date = "2026-01-01"
 

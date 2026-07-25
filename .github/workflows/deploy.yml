@@ -1,6 +1,11 @@
 name: deploy
 
+# Master deploys itself. The `production` environment gates every run behind a
+# required reviewer, so landing on master queues a release rather than shipping
+# one. Dispatch stays for re-running a deploy without a new commit.
 on:
+  push:
+    branches: [master]
   workflow_dispatch:
 
 permissions:
