@@ -53,6 +53,9 @@ const dims = (v: string) => {
   return { width, height };
 };
 
+// Shot with the flows themselves, on the account's own storage.
+const R2 = "https://pub-8b9f695d1cd040a485bb217292272f65.r2.dev/media/0x909Ef6B32DfDc12CA86aA710b54c991af3C5F82E";
+
 export const FLOWS: Flow[] = [
   {
     id: "video-control",
@@ -63,6 +66,12 @@ export const FLOWS: Flow[] = [
       "Drop a character sheet on the identity slot so every frame keeps the same face and wardrobe.",
       "Describe only the look: lighting, lens, grade. The video owns the motion, so don't re-describe it.",
     ],
+    sample: {
+      in: [
+        { url: `${R2}/24c01edfdaa24aee4cc22ca5c82388b4ecddf022bc3c89b64aa1ca561a2ac8c6.mp4`, kind: "video", caption: "cskel27 control take" },
+      ],
+      out: { url: `${R2}/af3ea603524ebba08c1a37392804a9f37e350139d2211cedd53d52db0b72948d.mp4`, kind: "video", caption: "1536×896 · 1000 cr" },
+    },
     model: "ltx-enhance",
     endpoint: "enhance",
     slots: [
@@ -111,6 +120,12 @@ export const FLOWS: Flow[] = [
       "Drop one to four images — each becomes a keyframe, in order, across the clip.",
       "Describe the motion here: with no control video, the prompt is the only thing driving it.",
     ],
+    sample: {
+      in: [
+        { url: `${R2}/c3b32e65ce501fe56d2f638fc1057068d3e359006a1154faf357f8fcc7817514.png`, kind: "image", caption: "one character render" },
+      ],
+      out: { url: `${R2}/ab13ef3e79c00fa5c14761b0ac79d5e2497ef2230720affa6a55b66b88368f3f.mp4`, kind: "video", caption: "10s game capture · identity held · 750 cr" },
+    },
     model: "ltx-2.3",
     endpoint: "multi_reference",
     slots: [

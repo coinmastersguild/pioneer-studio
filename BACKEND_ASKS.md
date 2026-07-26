@@ -79,19 +79,69 @@ that is a free quality improvement across every motion in the studio.
 
 Two things the model card doesn't say, both of which we are currently guessing at:
 
-**a. Max `width`/`height`.** The card documents `control_video`,
-`reference_sheet`, and the 121/241 frame bands, but no resolution bounds. The
-studio has been hardcoding **768×448**, and the output reads soft/blurry — very
-likely just that. `ltx-2.3 generate` documents arbitrary `height`/`width` on the
-same 22B base, so we've moved the flows to 1536×896 (exactly 2× the control take,
-so the pose still registers against the frame). Confirm the ceiling, and whether
-credits change with resolution.
+**a. Max `width`/`height` — answered, please document.** Job `j-3e7206a490a5`
+ran at **1536×896 for the same 1000 cr** as 768×448. Resolution is not priced,
+and the studio had been hardcoding the smallest option, which was the entire
+cause of the "blurry output" reports. Please state the ceiling on the model card
+so nobody re-derives this by spending credits.
 
-**b. Does `control_video` have to be an ARDY skeleton render?** The card says
-"ARDY skeleton `control_video`". If the Union-Control IC-LoRA in fact conditions
-on *any* video, say so — that makes real footage a legal control input, which is
-the single highest-value flow we could ship and needs no new endpoint at all. If
-it genuinely requires a skeleton render, ask #1 becomes the blocking dependency.
+**b. `reference_sheet` does not hold identity — what format does it want?**
+This is the important one. Same source image (a single full-body character
+render on white), two endpoints, opposite results:
+
+| Endpoint | Identity outcome |
+|---|---|
+| `ltx-2.3 multi_reference` (`images`) | **Held perfectly** — vest, its logo, beanie, beard, all consistent across 240 frames |
+| `ltx-enhance` (`reference_sheet`) | **Lost.** The sheet ghosts into roughly the first 25 frames as a semi-transparent double exposure, dissolves, and the subject then renders as a generic shirtless man — the prompt's wardrobe went with it |
+
+So `reference_sheet` behaves like first-frame image conditioning that decays,
+not like identity conditioning. Does it expect a specific layout — a multi-view
+turnaround grid rather than a single pose? A transparent background rather than
+white? A different aspect? As it stands, the pose-controlled flow cannot keep a
+character on model, which is the whole premise of the IC-LoRA.
+
+**c. Does `control_video` have to be an ARDY skeleton render?** Still open. If
+the Union-Control IC-LoRA conditions on *any* video, say so — that makes real
+footage a legal control input directly.
+
+---
+
+## 4. `wan-s2v lipsync` returns 500 on every call
+
+Two attempts, two different portraits, identical failure. Credits were refunded
+both times, so nothing was lost but the flow is unusable.
+
+```
+j-25100b2af2bf  full-body render + wav → 500
+j-3c5ea8811b24  head-and-shoulders crop + same wav → 500
+response={"detail":"Generation command failed (return code 1)"}
+for url 'http://localhost:7860/api/lipsync'
+```
+
+Both inputs fetched cleanly (the log shows the image and audio downloads
+succeeding), and the request the service received looks well-formed:
+`num_steps: 35, fps: 24, seed: 12345, face_enhance: True, size: 480*832`. The
+failure is inside the generation command. The audio was our own
+`voxcpm2-tts` wav, so the two services disagree on something — sample rate or
+container is the obvious suspect.
+
+`wan-s2v` is listed in `/jobs/models`, so the studio offers the flow as
+available. Any user picking it today gets a 500.
+
+---
+
+## 5. GPU capacity
+
+Two of three sample renders queued behind GPU pressure, and the TTS job
+`j-a914bd68264f` failed outright:
+
+```
+waiting_for_gpu — GPU1 has 11.2GB free, need ~14GB — waiting for capacity
+FAILED: GPU0 is thermally throttled (temp too high); aborting before compose-up
+```
+
+Credits were correctly refunded on the failure, and the surfaced reason was
+genuinely useful. Flagging it as a capacity/cooling signal rather than a bug.
 
 ---
 
