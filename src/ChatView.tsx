@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { submitJob, uploadMedia, type MediaObject } from "./api";
-import { boardBrief, injectRefs, requestJobPlan } from "./copilot";
+import { submitJob, uploadMedia, type ChatMessage, type MediaObject } from "./api";
+import { boardBrief, critiqueResult, injectRefs, requestJobPlan } from "./copilot";
 import { loadPipeline } from "./pipeline";
 import { consumeChatMedia } from "./chatHandoff";
 import FlowCard from "./FlowCard";
@@ -28,7 +28,9 @@ type Part =
   | { id: number; type: "plan"; plan: PlanInfo }
   | { id: number; type: "job"; job: JobInfo }
   | { id: number; type: "flow"; flowId: string }
-  | { id: number; type: "skeleton" };
+  | { id: number; type: "skeleton" }
+  | { id: number; type: "ask"; question: string; options: string[]; answered: string | null }
+  | { id: number; type: "fix"; intent: string; url: string; notes: string; fix: string; applied: boolean };
 type Turn = { id: number; who: "user" | "ai"; parts: Part[] };
 
 // mirrors copilot injectRefs — only these refs actually reach the job params
@@ -100,6 +102,9 @@ export default function ChatView({ ps }: { ps: PS }) {
   const box = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const nextId = useRef(1);
+  // the interview so far — the copilot keeps asking until it has enough, so it
+  // has to see what it already asked and what was answered
+  const historyRef = useRef<ChatMessage[]>([]);
   const psRef = useRef(ps);
   psRef.current = ps;
 
@@ -192,8 +197,25 @@ export default function ChatView({ ps }: { ps: PS }) {
       // the board as it actually stands — otherwise "how is the storyboard doing?"
       // gets answered from the media list, which is a different question
       const brief = boardBrief(p.board, p.board ? loadPipeline(p.board.id) : null);
-      const plan = await requestJobPlan(p.apiKey, p.models, mediaObjects, t, brief);
+      const plan = await requestJobPlan(p.apiKey, p.models, mediaObjects, t, brief, historyRef.current);
+      historyRef.current = [...historyRef.current, { role: "user" as const, content: t }].slice(-12);
       if (plan.say) await streamText(aiTurn, plan.say);
+
+      // still gathering — put the question on screen and wait for the answer
+      if (plan.ask) {
+        historyRef.current = [...historyRef.current, { role: "assistant" as const, content: `I asked: ${plan.ask.question}` }].slice(-12);
+        addPart(aiTurn, { type: "ask", question: plan.ask.question, options: plan.ask.options, answered: null } as Omit<Part, "id">);
+        return;
+      }
+      // needs files from the user — the card collects them
+      if (plan.flow) {
+        if (plan.flow === "skeleton") await openSkeleton();
+        else {
+          const f = flowById(plan.flow);
+          if (f) addPart(aiTurn, { type: "flow", flowId: f.id } as Omit<Part, "id">);
+        }
+        return;
+      }
       if (!plan.job) return;
 
       const { model, endpoint } = plan.job;
@@ -232,6 +254,16 @@ export default function ChatView({ ps }: { ps: PS }) {
         aiTurn,
         `Done — ${res.credits_charged} cr, ${secs}s. Saved to Media with a public R2 URL — share it or feed it into the next job.`,
       );
+      historyRef.current = [...historyRef.current, { role: "assistant" as const, content: `I rendered: ${t}` }].slice(-12);
+      // look at what came back and say whether it is what was asked for
+      if (kind === "image") {
+        p.setAiState("reviewing the result", true);
+        const c = await critiqueResult(p.apiKey, t, url).catch(() => null);
+        if (c) {
+          await streamText(aiTurn, c.ok ? `Checked it: ${c.notes}` : `That missed something — ${c.notes}`);
+          if (c.fix) addPart(aiTurn, { type: "fix", intent: t, url, notes: c.notes, fix: c.fix, applied: false } as Omit<Part, "id">);
+        }
+      }
     } catch (e: any) {
       clearTimeout(runTimer);
       const error = String(e.message || e);
@@ -353,6 +385,46 @@ export default function ChatView({ ps }: { ps: PS }) {
                 {turn.parts.map((part) => {
                   if (part.type === "text") return <p key={part.id}>{part.text}</p>;
                   if (part.type === "skeleton") return <SkeletonCard key={part.id} ps={ps} />;
+                  if (part.type === "ask") {
+                    const answer = (a: string) => {
+                      patchPart(turn.id, part.id, { answered: a } as Partial<Part>);
+                      void fire(a);
+                    };
+                    return (
+                      <div key={part.id} className="ask-card">
+                        <div className="ask-q">{part.question}</div>
+                        {part.answered ? (
+                          <div className="ask-picked">{part.answered}</div>
+                        ) : (
+                          <div className="ask-opts">
+                            {part.options.map((o) => (
+                              <button key={o} type="button" className="ask-opt" onClick={() => answer(o)}>
+                                {o}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+                  if (part.type === "fix") {
+                    return (
+                      <div key={part.id} className="fix-card">
+                        <div className="fix-note">Suggested fix: {part.fix}</div>
+                        <button
+                          type="button"
+                          className="ask-opt"
+                          disabled={part.applied}
+                          onClick={() => {
+                            patchPart(turn.id, part.id, { applied: true } as Partial<Part>);
+                            void fire(`Edit that image — ${part.fix}`);
+                          }}
+                        >
+                          {part.applied ? "Applied" : "Apply the fix"}
+                        </button>
+                      </div>
+                    );
+                  }
                   if (part.type === "flow") {
                     const f = flowById(part.flowId);
                     return f ? <FlowCard key={part.id} flow={f} ps={ps} /> : null;

@@ -2,7 +2,7 @@
 // The LLM never sees raw URLs; it picks refs by media key and the client
 // injects the public R2 URLs into params by content type.
 
-import { chatCompletion, type JobModel, type MediaObject, type Storyboard } from "./api";
+import { captionImage, chatCompletion, type ChatMessage, type JobModel, type MediaObject, type Storyboard } from "./api";
 import { extOf, type Pipeline } from "./pipeline";
 import { boardReadiness } from "./readiness";
 
@@ -40,6 +40,10 @@ export function boardBrief(board: Storyboard | null, pipe: Pipeline | null): str
 
 export type JobPlan = {
   say: string;
+  /** the copilot needs one more thing before it can act */
+  ask?: { question: string; options: string[] };
+  /** open a control-flow card instead of firing a one-shot job */
+  flow?: string;
   job?: {
     model: string;
     endpoint: string;
@@ -57,8 +61,28 @@ function systemPrompt(models: JobModel[], media: MediaObject[], brief: string): 
     : "(none)";
   return `You are the Pioneer Studio copilot. The user describes what they want in plain language; you pick the model, endpoint, and parameters, and wire up their references.
 Respond with ONLY a JSON object, no prose, no code fences:
-{"say":"<one or two sentences — terse, technical, specific>","job":{"model":"<model>","endpoint":"<endpoint>","params":{...},"refs":["<media key>", ...]}}
-If the request needs no generation job, omit "job" and answer in "say".
+{"say":"<one or two sentences — terse, technical, specific>", ...one of "ask" | "flow" | "job", or none}
+
+You drive this studio. Every reply does exactly one of four things:
+
+1. ASK — a detail is missing that would change the output. Emit
+   {"say":"...","ask":{"question":"<one question>","options":["<2-4 concrete answers>"]}}
+   Ask ONE question at a time, and only when the answer changes what you would produce.
+   Never ask about something the user already told you or that the state below answers.
+   Two questions is usually plenty; when you have enough, act.
+2. FLOW — the request needs files the user must supply (a control video, a portrait,
+   an audio bed) or is a multi-input pipeline. Emit {"say":"...","flow":"<flow id>"} and
+   the card collects the inputs. Prefer this over inventing refs the user did not mention.
+3. JOB — you have everything. Emit the "job" object below.
+4. Neither — a question about state or a plain answer: just "say".
+
+{"job":{"model":"<model>","endpoint":"<endpoint>","params":{...},"refs":["<media key>", ...]}}
+
+Control flows you can open by id:
+- video-control — a video drives the motion, a character sheet holds identity, LTX renders it
+- sheet-to-video — 1-4 stills become keyframes of a video
+- talking-head — a portrait plus audio becomes a lip-synced performance
+- skeleton — pull a cskel27 pose control take out of real footage, locally and free
 
 When asked about the state of the project — status, what is left, what is missing, is it ready —
 answer from the STORYBOARD STATE below, naming actual beats and what each one lacks. Never
@@ -93,6 +117,9 @@ function parsePlan(content: string): JobPlan {
   if (start === -1 || end <= start) throw new Error("copilot: no JSON plan in reply");
   const obj = JSON.parse(text.slice(start, end + 1));
   if (typeof obj.say !== "string") obj.say = "";
+  if (obj.ask && typeof obj.ask.question !== "string") delete obj.ask;
+  if (obj.ask) obj.ask.options = Array.isArray(obj.ask.options) ? obj.ask.options.filter((o: unknown) => typeof o === "string").slice(0, 4) : [];
+  if (obj.flow && typeof obj.flow !== "string") delete obj.flow;
   if (obj.job && (typeof obj.job.model !== "string" || typeof obj.job.endpoint !== "string")) delete obj.job;
   if (obj.job) {
     obj.job.params = obj.job.params && typeof obj.job.params === "object" ? obj.job.params : {};
@@ -107,12 +134,41 @@ export async function requestJobPlan(
   media: MediaObject[],
   userText: string,
   brief = "Storyboard: not loaded.",
+  history: ChatMessage[] = [],
 ): Promise<JobPlan> {
   const content = await chatCompletion(apiKey, [
     { role: "system", content: systemPrompt(models, media, brief) },
+    ...history,
     { role: "user", content: userText },
   ]);
   return parsePlan(content);
+}
+
+export type Critique = { ok: boolean; notes: string; fix: string };
+
+/** Look at what came back and say whether it is what was asked for.
+ *
+ *  `fix` is written as an edit instruction, not a fresh prompt: the result is
+ *  already most of the way there, so the repair belongs on the edit endpoint
+ *  with the render itself as input. */
+export async function critiqueResult(apiKey: string, intent: string, imageUrl: string): Promise<Critique> {
+  const raw = await captionImage(
+    apiKey,
+    imageUrl,
+    `The user asked for: "${intent}".
+Judge the image against that request only. Reply with ONLY JSON, no fences:
+{"ok": true|false, "notes":"<one sentence — what landed, and what missed>", "fix":"<an edit instruction that would repair the miss, or empty string if nothing needs fixing>"}
+Be specific and concrete. Do not invent problems: if it matches the request, say ok true with an empty fix.`,
+  );
+  try {
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+    const o = JSON.parse(raw.slice(start, end + 1));
+    return { ok: o.ok !== false, notes: String(o.notes || "").trim(), fix: String(o.fix || "").trim() };
+  } catch {
+    // a vision model that ignored the format still said something useful
+    return { ok: true, notes: raw.slice(0, 200), fix: "" };
+  }
 }
 
 // Inject ref URLs into params the way each endpoint expects.
