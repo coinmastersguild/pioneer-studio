@@ -507,7 +507,14 @@ export const patchShot = async (
   _k: string,
   _rev: number | undefined,
   id: string,
-  patch: { prompt?: string; model?: string; endpoint?: string; status?: ShotStatus; sourceDuration?: number },
+  patch: {
+    prompt?: string;
+    model?: string;
+    endpoint?: string;
+    status?: ShotStatus;
+    sourceDuration?: number;
+    result?: Shot["result"];
+  },
 ): Promise<Storyboard> =>
   sbEdit((sb) => {
     Object.assign(sbShot(sb, id), patch, { updatedAt: Date.now() });
@@ -579,6 +586,42 @@ export async function chatCompletionMessage(
     content: typeof message.content === "string" ? message.content : null,
     tool_calls: Array.isArray(message.tool_calls) ? message.tool_calls : undefined,
   };
+}
+
+/** Describe an image in one line — what a dropped still is *about*, so a beat
+ *  can write its own text.
+ *
+ *  Vision needs a named model: `model:"auto"` routes to text-only backends and
+ *  fails with "image input is not supported". These two are the ones on the
+ *  account that actually take an image, tried in order. */
+const VISION_MODELS = ["gemini-3-6-flash", "z-ai-glm-5v-turbo"];
+export async function captionImage(apiKey: string, imageUrl: string, instruction?: string): Promise<string> {
+  const content = [
+    {
+      type: "text",
+      text:
+        instruction ||
+        "Describe this image in one vivid sentence for a storyboard beat: who or what is in frame, what they are doing, and the setting. No preamble, no quotes.",
+    },
+    { type: "image_url", image_url: { url: imageUrl } },
+  ];
+  let lastError = "";
+  for (const model of VISION_MODELS) {
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/chat/completions`, {
+        method: "POST",
+        headers: { ...authHeaders(apiKey), "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content }], temperature: 0.3 }),
+      });
+      const body = await res.json();
+      const text = body?.choices?.[0]?.message?.content;
+      if (res.ok && typeof text === "string" && text.trim()) return text.trim();
+      lastError = body?.error || `caption: ${res.status}`;
+    } catch (e: any) {
+      lastError = String(e.message || e);
+    }
+  }
+  throw new Error(lastError || "no vision model answered");
 }
 
 export async function chatCompletion(apiKey: string, messages: ChatMessage[]): Promise<string> {

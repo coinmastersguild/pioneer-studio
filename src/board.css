@@ -126,6 +126,9 @@
 .bd-actions .beat-btn{ flex:0 0 auto; padding:6px 12px; }
 .bd-img{ aspect-ratio:16/9; border-radius:var(--radius-md); border:1px solid var(--border); position:relative; overflow:hidden; }
 .bd-img.busy{ filter:blur(3px) saturate(.7) brightness(.85); }
+/* a beat still accepts a dropped image — the beat then describes itself */
+.bd-img.drop{ border-color:var(--accent); border-style:dashed; box-shadow:inset 0 0 0 9999px var(--accent-subtle); }
+.bd-pick{ background:var(--bg-elevated); color:var(--fg1); border:1px solid var(--border); border-radius:var(--radius-sm); padding:4px 8px; font:inherit; font-size:11.5px; max-width:190px; }
 .bd-desc{ font-size:11.5px; color:var(--fg3); line-height:1.45; }
 .bd-video{ width:100%; border-radius:var(--radius-md); border:1px solid var(--border); }
 .bd-chips{ display:flex; flex-wrap:wrap; gap:8px; }

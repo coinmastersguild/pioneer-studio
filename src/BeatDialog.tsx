@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { patchShot, type Shot } from "./api";
+import { useRef, useState } from "react";
+import { captionImage, patchShot, uploadMedia, type MediaObject, type Shot } from "./api";
 import { isShotRunning, renderShot } from "./shots";
 import { fmtTime, kindOf, PH, type PS } from "./shared";
 import {
@@ -44,6 +44,8 @@ export default function BeatDialog({
 }) {
   const [text, setText] = useState(shot.prompt);
   const [busy, setBusy] = useState<string | null>(null); // which row is working
+  const [dragOver, setDragOver] = useState(false);
+  const picker = useRef<HTMLInputElement>(null);
   const ext = extOf(pipe, shot.id);
   const [finalPrompt, setFinalPrompt] = useState(ext.finalPrompt);
   const scene = sceneArtOf(pipe, ext); // library location image (or legacy scene)
@@ -90,6 +92,39 @@ export default function BeatDialog({
     });
 
   const defaultFinal = () => buildFinalPrompt(shot.prompt, ext, pipe.characters);
+
+  /** Attach an existing image as this beat's still, and let it describe itself.
+   *  A picture dropped on an empty beat writes the beat text; a beat that
+   *  already has text keeps it — re-describing is an explicit button. */
+  async function attachImage(url: string, key: string, contentType: string, bytes = 0) {
+    const sb = await patchShot(ps.apiKey, undefined, shot.id, {
+      result: { url, key, content_type: contentType, bytes },
+      status: "ready",
+    });
+    ps.setBoard(sb);
+    if (text.trim()) return;
+    await describeFrom(url);
+  }
+
+  async function describeFrom(url: string) {
+    const caption = await captionImage(ps.apiKey, url);
+    setText(caption);
+    const sb = await patchShot(ps.apiKey, undefined, shot.id, { prompt: caption });
+    ps.setBoard(sb);
+    mut((p) => markBeatEdited(p, shot.id));
+    ps.toast("Described from the image", "gold");
+  }
+
+  const attachFile = (file: File) =>
+    run("image", async () => {
+      if (!ps.apiKey) return ps.toast("Paste your sk-pioneer key first");
+      if (!file.type.startsWith("image/")) return ps.toast("Beats take an image here");
+      const up = await uploadMedia(ps.apiKey, file);
+      ps.refreshMedia();
+      await attachImage(up.url, up.key, up.content_type, file.size);
+    });
+
+  const mediaImages = (ps.media?.objects || []).filter((o: MediaObject) => o.content_type.startsWith("image/"));
 
   const img = (a: { url: string } | null, fallback?: boolean) =>
     a
@@ -175,14 +210,76 @@ export default function BeatDialog({
         <div className="bd-row">
           <div className="k">Placeholder</div>
           <div className="v">
-            <div className={`bd-img${rendering ? " busy" : ""}`} style={img(shot.result, true)} />
+            <div
+              className={`bd-img${rendering ? " busy" : ""}${dragOver ? " drop" : ""}`}
+              style={img(shot.result, true)}
+              onDragOver={(e) => {
+                if (!e.dataTransfer.types.includes("Files")) return;
+                e.preventDefault();
+                setDragOver(true);
+              }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setDragOver(false);
+                const f = e.dataTransfer.files[0];
+                if (f) void attachFile(f);
+              }}
+            />
             <div className="bd-desc">
-              {rendering
-                ? `rendering — ${shot.status}`
-                : shot.result
-                  ? "fast draft still — the final look comes from the Phase 2/3 assets below"
-                  : "no render yet — save the beat text to fire a fast placeholder"}
+              {busy === "image"
+                ? "reading the image…"
+                : rendering
+                  ? `rendering — ${shot.status}`
+                  : shot.result
+                    ? "fast draft still — the final look comes from the Phase 2/3 assets below"
+                    : "drop an image here, pick one below, or save the beat text to render a placeholder"}
             </div>
+            <div className="bd-actions">
+              <button type="button" className="beat-btn" disabled={!!busy} onClick={() => picker.current?.click()}>
+                Upload image
+              </button>
+              {!!mediaImages.length && (
+                <select
+                  className="bd-pick"
+                  value=""
+                  disabled={!!busy}
+                  onChange={(e) => {
+                    const hit = mediaImages.find((o) => o.url === e.target.value);
+                    if (hit) void run("image", () => attachImage(hit.url, hit.key, hit.content_type, hit.bytes));
+                  }}
+                >
+                  <option value="">Use from media…</option>
+                  {mediaImages.map((o) => (
+                    <option key={o.key} value={o.url}>
+                      {o.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {shot.result && (
+                <button
+                  type="button"
+                  className="beat-btn"
+                  disabled={!!busy}
+                  onClick={() => void run("image", () => describeFrom(shot.result!.url))}
+                >
+                  Describe from image
+                </button>
+              )}
+            </div>
+            <input
+              ref={picker}
+              type="file"
+              accept="image/*"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) void attachFile(f);
+                e.target.value = "";
+              }}
+            />
           </div>
         </div>
 
