@@ -43,6 +43,7 @@ import {
   type PS,
   type Suggestion,
 } from "./shared";
+import { registerActions } from "./control";
 import { sendCharacter } from "./characterHandoff";
 import ChatView from "./ChatView";
 import BoardView from "./BoardView";
@@ -298,6 +299,44 @@ function App() {
       if (s.status === "error" || s.status === "failed") throw new Error(s.error || s.status);
     }
   }
+
+  // Actions belong to the view that owns them, so a mode nobody has opened has
+  // no actions registered — which leaves an external agent with no way in.
+  // These two are always live: read where you are, and go somewhere else.
+  useEffect(() => {
+    registerActions([
+      {
+        name: "app.get_state",
+        description: "Where the studio is right now: mode, credential, credits, open project, and how many models are live",
+        run: () => ({
+          mode,
+          hasKey: !!apiKey,
+          wallet: wallet || null,
+          credits,
+          projectId: board?.id || null,
+          beats: board?.shots.length ?? 0,
+          models: models.length,
+          busy: busyRef.current,
+        }),
+      },
+      {
+        name: "app.set_mode",
+        description: "Open a mode. Its actions register as it mounts, so call this before looking for them",
+        parameters: {
+          type: "object",
+          properties: { mode: { type: "string", enum: Object.keys(MODE_LABEL) } },
+          required: ["mode"],
+          additionalProperties: false,
+        },
+        run: (params) => {
+          const next = String(params?.mode || "") as Mode;
+          if (!(next in MODE_LABEL)) throw new Error(`unknown mode "${next}"`);
+          setMode(next);
+          return { mode: next };
+        },
+      },
+    ]);
+  }, [mode, apiKey, wallet, credits, board, models]);
 
   const ps: PS = {
     apiKey,
