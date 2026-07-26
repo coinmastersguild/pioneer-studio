@@ -73,6 +73,23 @@ test("pose-controlled LTX is routed separately from ordinary video", () => {
   expect(pickModel(models, "motion_video")?.model).toBe("ltx-enhance");
 });
 
+test("mage-flow wins generation and edit even when flux2-dev's notes say 'image'", () => {
+  // flux2-dev listed first, notes containing "reference-image" — the substring
+  // "mage" inside "image" must not count as a Mage match
+  const models = [
+    { model: "flux2-dev", endpoint: "generate", credits: 50, note: "FLUX.2-dev 32B text→image" },
+    { model: "flux2-dev", endpoint: "edit", credits: 50, note: "single reference-image edit" },
+    { model: "mage-flow", endpoint: "generate", credits: 15, note: "Mage-Flow-Turbo 4-step text→image" },
+    { model: "mage-flow-edit", endpoint: "edit", credits: 25, note: "Mage-Flow-Edit-Turbo instruction-based edit" },
+  ];
+  expect(pickModel(models, "image")?.model).toBe("mage-flow");
+  expect(pickModel(models, "image_edit")?.model).toBe("mage-flow-edit");
+  // without mage on the account, flux2-dev remains the pick
+  const fluxOnly = models.slice(0, 2);
+  expect(pickModel(fluxOnly, "image")?.model).toBe("flux2-dev");
+  expect(pickModel(fluxOnly, "image_edit")?.model).toBe("flux2-dev");
+});
+
 test("MediaPipe landmarks map onto the cskel27 joints the control take draws", async () => {
   const { mapLandmarks, CSKEL_BONES, boneColor, fitBox } = await import("./poseExtract");
   // a crude standing figure: shoulders at y .3, hips at y .5, feet at y .9

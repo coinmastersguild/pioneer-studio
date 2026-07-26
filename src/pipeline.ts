@@ -234,14 +234,18 @@ export function pickModel(
     case "image_edit":
       // Editing an existing still, never regenerating it from scratch. Mage-Flow's
       // edit checkpoint wins when the account exposes it; flux2-dev edit until then.
+      // \bmage so "reference-image" in flux2-dev's note doesn't match.
       return (
-        models.find((m) => m.endpoint === "edit" && has(m, /mage/i)) || models.find((m) => m.endpoint === "edit")
+        models.find((m) => m.endpoint === "edit" && has(m, /\bmage/i)) || models.find((m) => m.endpoint === "edit")
       );
     case "image_refs":
       // genImage handles both param shapes, so an edit-endpoint model is a valid ref model
       return models.find((m) => !isVid(m) && m.endpoint === "multi_reference") || models.find((m) => !isVid(m) && m.endpoint === "edit");
     default:
+      // Mage-Flow-Turbo is the plain-generation default (fast, MIT-licensed);
+      // flux2-dev stays the fallback where the account doesn't expose it.
       return (
+        models.find((m) => m.endpoint === "generate" && has(m, /\bmage/i)) ||
         models.find((m) => m.model === "flux2-dev" && m.endpoint === "generate") ||
         models.find((m) => m.endpoint === "generate" && !isVid(m) && !isAud(m)) ||
         models[0]
