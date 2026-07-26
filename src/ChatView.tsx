@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { submitJob, uploadMedia, type ChatMessage, type MediaObject } from "./api";
-import { boardBrief, critiqueResult, injectRefs, requestJobPlan } from "./copilot";
+import { boardBrief, critiqueResult, injectRefs, proposeContract, requestJobPlan } from "./copilot";
+import LoopCard from "./LoopCard";
+import type { Contract } from "./workLoop";
 import { loadPipeline } from "./pipeline";
 import { consumeChatMedia } from "./chatHandoff";
 import FlowCard from "./FlowCard";
@@ -30,7 +32,8 @@ type Part =
   | { id: number; type: "flow"; flowId: string }
   | { id: number; type: "skeleton" }
   | { id: number; type: "ask"; question: string; options: string[]; answered: string | null }
-  | { id: number; type: "fix"; intent: string; url: string; notes: string; fix: string; applied: boolean };
+  | { id: number; type: "fix"; intent: string; url: string; notes: string; fix: string; applied: boolean }
+  | { id: number; type: "loop"; contract: Contract; job: { model: string; endpoint: string; params: Record<string, unknown> } | null };
 type Turn = { id: number; who: "user" | "ai"; parts: Part[] };
 
 // mirrors copilot injectRefs — only these refs actually reach the job params
@@ -153,6 +156,26 @@ export default function ChatView({ ps }: { ps: PS }) {
   const openFlowRef = useRef(openFlow);
   openFlowRef.current = openFlow;
 
+  /** Turn a goal into a contract and put the loop on screen. Nothing is spent
+   *  until the contract is approved on the card. */
+  async function openLoop(goal: string) {
+    const p = psRef.current;
+    if (!p.apiKey) return p.toast("Add your key in Settings to plan a loop");
+    const aiTurn = addTurn("ai");
+    p.setAiState("writing the contract", true);
+    try {
+      const { contract, job } = await proposeContract(p.apiKey, p.models, goal);
+      await streamText(aiTurn, `Here is what I would grade this against. Change anything that is wrong, set a ceiling, then approve.`);
+      addPart(aiTurn, { type: "loop", contract, job } as Omit<Part, "id">);
+    } catch (e: any) {
+      await streamText(aiTurn, `Could not plan that: ${String(e.message || e)}`);
+    } finally {
+      p.setAiState("idle", false);
+    }
+  }
+  const openLoopRef = useRef(openLoop);
+  openLoopRef.current = openLoop;
+
   async function openSkeleton() {
     const aiTurn = addTurn("ai");
     await streamText(aiTurn, "Video → skeleton. The pose comes out of real footage instead of being authored.");
@@ -170,6 +193,10 @@ export default function ChatView({ ps }: { ps: PS }) {
     setText("");
     if (box.current) box.current.style.height = "auto";
     addTurn("user", [{ id: nextId.current++, type: "text", text: t }]);
+    if (/\b(loop|keep (going|trying)|until (it|its|it's)? ?(right|good|done)|iterate|refine until|work on (it|this) until)\b/i.test(t)) {
+      await openLoop(t);
+      return;
+    }
     if (wantsSkeleton(t)) {
       await openSkeleton();
       return;
@@ -385,6 +412,7 @@ export default function ChatView({ ps }: { ps: PS }) {
                 {turn.parts.map((part) => {
                   if (part.type === "text") return <p key={part.id}>{part.text}</p>;
                   if (part.type === "skeleton") return <SkeletonCard key={part.id} ps={ps} />;
+                  if (part.type === "loop") return <LoopCard key={part.id} ps={ps} contract={part.contract} job={part.job} />;
                   if (part.type === "ask") {
                     const answer = (a: string) => {
                       patchPart(turn.id, part.id, { answered: a } as Partial<Part>);

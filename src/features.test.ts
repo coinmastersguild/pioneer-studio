@@ -297,3 +297,32 @@ test("the copilot's board brief reports real beat state, not the media list", as
   expect(brief).toContain("Cat"); // the cast is named
   expect(boardBrief(null, null)).toContain("empty");
 });
+
+test("the work loop scores, converges, restarts, and always has a way out", async () => {
+  const { scoreOf, decide, DEFAULT_AXES } = await import("./workLoop");
+  type Attempt = import("./workLoop").Attempt;
+  type RunLog = import("./workLoop").RunLog;
+
+  // weighted, and normalised by the weights actually present
+  expect(scoreOf({ subject: 1, composition: 1, look: 1, craft: 1 }, DEFAULT_AXES)).toBe(1);
+  expect(scoreOf({ subject: 0, composition: 1, look: 1, craft: 1 }, DEFAULT_AXES)).toBeCloseTo(0.6, 3);
+  // a missing axis must not drag the score down as if it scored zero
+  expect(scoreOf({ subject: 1 }, DEFAULT_AXES)).toBe(1);
+
+  const contract = { goal: "g", assertions: ["a"], axes: DEFAULT_AXES, target: 0.8, maxAttempts: 3, creditCeiling: 200 };
+  const at = (n: number, score: number, fix = "make it bluer", creditsSpent = 50): Attempt =>
+    ({ n, url: `u${n}`, score, perAxis: {}, notes: "", fix, creditsSpent, at: 0 });
+  const run = (attempts: Attempt[]): RunLog => ({ id: "r", contract, attempts, done: false, stopped: "" });
+
+  expect(decide(run([]), 50).action).toBe("stop"); // nothing rendered
+  expect(decide(run([at(1, 0.85)]), 50)).toEqual({ action: "stop", why: "hit the bar — 0.85 ≥ 0.8" });
+  expect(decide(run([at(1, 0.4)]), 50)).toEqual({ action: "fix", instruction: "make it bluer" });
+  // two passes that did not move the number restart instead of patching further
+  expect(decide(run([at(1, 0.4), at(2, 0.41)]), 50).action).toBe("restart");
+  expect(decide(run([at(1, 0.4), at(2, 0.6)]), 50).action).toBe("fix");
+  // out of attempts, and the credit ceiling, both terminate
+  expect(decide(run([at(1, 0.3), at(2, 0.5), at(3, 0.6)]), 50).action).toBe("stop");
+  expect(decide(run([at(1, 0.3, "f", 180)]), 50).why).toContain("ceiling");
+  // an evaluator with no repair to offer must not loop forever
+  expect(decide(run([at(1, 0.4, "")]), 50)).toEqual({ action: "stop", why: "the evaluator had no repair to suggest" });
+});

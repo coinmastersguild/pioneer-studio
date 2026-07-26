@@ -175,3 +175,11 @@
 .ask-opt:disabled{ opacity:.5; cursor:default; }
 .ask-picked{ font-family:var(--mono); font-size:11.5px; color:var(--accent); }
 .fix-note{ font-size:12px; color:var(--fg2); line-height:1.45; }
+
+/* a run you can watch: contract, then every attempt with its score */
+.loop-contract ol{ margin:6px 0 0; padding-left:18px; display:flex; flex-direction:column; gap:4px; }
+.loop-contract li{ font-size:11.5px; color:var(--fg2); line-height:1.4; }
+.loop-contract label{ display:flex; gap:7px; align-items:flex-start; cursor:pointer; }
+.loop-contract input{ margin-top:2px; }
+.loop-attempt{ display:flex; flex-direction:column; gap:5px; border-top:1px solid var(--border); padding-top:8px; }
+.loop-attempt img{ width:100%; border-radius:var(--radius-sm); border:1px solid var(--border); }

@@ -5,6 +5,7 @@
 import { captionImage, chatCompletion, type ChatMessage, type JobModel, type MediaObject, type Storyboard } from "./api";
 import { extOf, type Pipeline } from "./pipeline";
 import { boardReadiness } from "./readiness";
+import { DEFAULT_AXES, type Contract } from "./workLoop";
 
 /** The board as the copilot needs to see it: what exists, what is missing, and
  *  where the work actually stands. Without this it answers questions about the
@@ -142,6 +143,88 @@ export async function requestJobPlan(
     { role: "user", content: userText },
   ]);
   return parsePlan(content);
+}
+
+/** PLANNER role. Turns a goal into a contract — what "done" looks like — before
+ *  a single credit is spent. Deliberately a separate call from the evaluator:
+ *  a model that grades its own rubric grades itself generous. */
+export async function proposeContract(
+  apiKey: string,
+  models: JobModel[],
+  goal: string,
+): Promise<{ contract: Contract; job: { model: string; endpoint: string; params: Record<string, unknown> } | null }> {
+  const modelLines = models.map((m) => `- ${m.model} · ${m.endpoint} (${m.credits} cr) — ${m.note || ""}`).join("\n");
+  const raw = await chatCompletion(apiKey, [
+    {
+      role: "system",
+      content: `You plan work for an AI production studio. Given a goal, write the contract that decides whether the finished artifact is acceptable, and the job that produces the first attempt.
+
+Reply with ONLY JSON, no fences:
+{"contract":{"goal":"<restated in one line>","assertions":["<6-12 concrete, checkable claims about the finished artifact>"],"target":<0.7-0.9>,"maxAttempts":<2-4>},
+ "job":{"model":"<model>","endpoint":"<endpoint>","params":{"prompt":"<the full generation prompt you would send>"}}}
+
+Assertions are things an evaluator can look at the result and check — "the character wears a yellow hi-vis vest", "the horizon is level", "there is no visible text". Not vibes: not "looks cinematic", not "high quality".
+Pick the cheapest model that can satisfy the goal. Write the prompt yourself, concrete and specific.
+
+Available models:
+${modelLines}`,
+    },
+    { role: "user", content: goal },
+  ]);
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  const o = JSON.parse(raw.slice(start, end + 1));
+  const c = o.contract || {};
+  const assertions = Array.isArray(c.assertions) ? c.assertions.filter((a: unknown) => typeof a === "string") : [];
+  return {
+    contract: {
+      goal: typeof c.goal === "string" && c.goal ? c.goal : goal,
+      assertions,
+      axes: DEFAULT_AXES,
+      target: Math.min(0.95, Math.max(0.5, Number(c.target) || 0.8)),
+      maxAttempts: Math.min(5, Math.max(1, Number(c.maxAttempts) || 3)),
+      creditCeiling: 0, // the user sets this — never the model
+    },
+    job:
+      o.job && typeof o.job.model === "string" && typeof o.job.endpoint === "string"
+        ? { model: o.job.model, endpoint: o.job.endpoint, params: o.job.params || {} }
+        : null,
+  };
+}
+
+/** EVALUATOR role. Told from the first token that the artifact is suspect and
+ *  its job is to find where it misses the contract — grading against the
+ *  assertions only, never against its own taste. */
+export async function scoreAgainstContract(
+  apiKey: string,
+  contract: Contract,
+  imageUrl: string,
+): Promise<{ perAxis: Record<string, number>; notes: string; fix: string }> {
+  const raw = await captionImage(
+    apiKey,
+    imageUrl,
+    `You are grading a render against a contract that was agreed before it was made. Assume it falls short somewhere and find where.
+
+GOAL: ${contract.goal}
+IT MUST BE TRUE THAT:
+${contract.assertions.map((a, i) => `${i + 1}. ${a}`).join("\n")}
+
+Score each axis 0..1 against those assertions only, not against your own taste:
+${contract.axes.map((a) => `- ${a.name} (weight ${a.weight})`).join("\n")}
+
+Reply with ONLY JSON, no fences:
+{"perAxis":{${contract.axes.map((a) => `"${a.name}":<0..1>`).join(",")}},"notes":"<one sentence naming the assertions that failed, by number>","fix":"<an edit instruction that repairs the biggest miss, or empty string if every assertion holds>"}`,
+  );
+  try {
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+    const o = JSON.parse(raw.slice(start, end + 1));
+    const perAxis: Record<string, number> = {};
+    for (const a of contract.axes) perAxis[a.name] = Number(o.perAxis?.[a.name]) || 0;
+    return { perAxis, notes: String(o.notes || "").trim(), fix: String(o.fix || "").trim() };
+  } catch {
+    return { perAxis: {}, notes: raw.slice(0, 200), fix: "" };
+  }
 }
 
 export type Critique = { ok: boolean; notes: string; fix: string };
