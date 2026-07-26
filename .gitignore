@@ -60,3 +60,6 @@ public/models/*
 
 # Deterministically copied from the locked three package by `bun run setup`.
 public/decoders/
+
+# Deterministically copied from the locked @mediapipe/tasks-vision by `bun run setup`.
+public/mediapipe/

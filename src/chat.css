@@ -101,3 +101,61 @@
 .composer-bar .send:hover{ background:var(--accent-hover); }
 .composer-bar .send:disabled{ opacity:.4; cursor:default; }
 .composer-bar .send svg{ width:16px; height:16px; }
+
+/* control flows — runnable cards in the thread */
+.flow-row{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:14px; }
+.flow-row .fr-label{ width:100%; font-size:11.5px; color:var(--fg3); }
+.flow-row .fr-btn{
+  border:1px solid var(--border); background:var(--bg-elevated); color:var(--fg1);
+  border-radius:var(--radius-sm); padding:6px 11px; font-size:12px; cursor:pointer;
+}
+.flow-row .fr-btn:not(:disabled):hover{ border-color:var(--accent); color:var(--accent); }
+.flow-row .fr-btn:disabled{ opacity:.4; cursor:not-allowed; }
+
+.flow-card{
+  border:1px solid var(--border); border-radius:var(--radius-lg); background:var(--card);
+  box-shadow: inset 0 1px 0 var(--card-highlight); margin:6px 0 4px; padding:12px 13px;
+  display:flex; flex-direction:column; gap:9px;
+  animation: rise .35s var(--ease-out) backwards;
+}
+.fc-head{ display:flex; align-items:center; gap:8px; }
+.fc-head b{ font-size:12.5px; }
+.fc-head .fc-model{ margin-left:auto; font-family:var(--mono); font-size:10.5px; color:var(--fg3); }
+.fc-blurb{ font-size:12px; color:var(--fg3); margin:0; }
+.fc-label{ display:block; font-size:11px; text-transform:uppercase; letter-spacing:.03em; color:var(--fg3); }
+.fc-label i, .fc-label em{ text-transform:none; letter-spacing:0; font-style:normal; color:var(--fg4); }
+.fc-slot{ border:1px solid var(--border); border-radius:var(--radius-sm); padding:8px 10px; display:flex; flex-direction:column; gap:5px; }
+.fc-slot.drop{ border-style:dashed; cursor:pointer; }
+.fc-slot.drop:hover, .fc-slot.over{ border-color:var(--accent); background:var(--accent-subtle); }
+.fc-slot.full{ border-style:solid; }
+.fc-value{ font-family:var(--mono); font-size:11.5px; color:var(--fg1); word-break:break-all; }
+.fc-slot textarea, .fc-pick, .fc-choice select{
+  width:100%; background:var(--bg-elevated); color:var(--fg1);
+  border:1px solid var(--border); border-radius:var(--radius-sm); padding:5px 7px; font:inherit; font-size:12px;
+}
+.fc-slot textarea{ resize:vertical; }
+.fc-choice{ display:flex; align-items:center; gap:10px; }
+.fc-choice .fc-label{ width:96px; flex-shrink:0; }
+.fc-foot{ display:flex; align-items:center; gap:9px; }
+.fc-need{ font-family:var(--mono); font-size:11px; color:var(--fg3); }
+.fc-run{
+  margin-left:auto; border:1px solid var(--accent); background:var(--accent-subtle); color:var(--accent);
+  border-radius:var(--radius-sm); padding:6px 14px; font-size:12px; cursor:pointer;
+}
+.fc-run:disabled{ opacity:.45; cursor:not-allowed; }
+.fc-note{ font-family:var(--mono); font-size:11px; color:var(--fg3); word-break:break-word; line-height:1.45; }
+.fc-note.warn{ color:#f0a89e; }
+.fc-result{ display:flex; flex-direction:column; gap:7px; align-items:flex-start; }
+.fc-result video, .fc-result img{ width:100%; border-radius:var(--radius-sm); }
+.chat-wrap.dropping{ outline:2px dashed var(--accent); outline-offset:-8px; }
+
+/* the flow pitch — before/after strip plus the numbered method */
+.fc-explain{ display:flex; flex-direction:column; gap:9px; }
+.fc-sample{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.fc-sample figure{ margin:0; flex:1 1 90px; min-width:80px; display:flex; flex-direction:column; gap:4px; }
+.fc-sample figure.out{ flex:1 1 150px; }
+.fc-sample video, .fc-sample img{ width:100%; border-radius:var(--radius-sm); border:1px solid var(--border); display:block; }
+.fc-sample figcaption{ font-size:10.5px; color:var(--fg4); }
+.fc-arrow{ color:var(--accent); font-size:15px; flex:0 0 auto; }
+.fc-steps{ margin:0; padding-left:18px; display:flex; flex-direction:column; gap:3px; }
+.fc-steps li{ font-size:11.5px; color:var(--fg3); line-height:1.45; }

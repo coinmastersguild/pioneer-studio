@@ -24,3 +24,10 @@ for (const name of ["draco", "basis"]) {
   mkdirSync(decoderTarget, { recursive: true });
   cpSync(source, join(decoderTarget, name), { recursive: true, force: true });
 }
+
+// MediaPipe's vision WASM, served from our own origin so pose extraction does
+// not depend on a third-party CDN staying up. The .task weights are fetched at
+// runtime (see POSE_MODEL_URL in src/poseExtract.ts) — too large to vendor.
+const mpSource = join(root, "node_modules/@mediapipe/tasks-vision/wasm");
+if (!existsSync(mpSource)) throw new Error(`${mpSource} is missing; run bun install --frozen-lockfile first`);
+cpSync(mpSource, join(root, "public/mediapipe/wasm"), { recursive: true, force: true });

@@ -26,6 +26,17 @@ import "./stage.css";
 const TAKE_SECONDS = 10; // matches the storyboard's default beat duration
 const ARM_DOWN = 1.25; // rad — the rig rests in a T-pose; drop the arms for the idle pose
 const CORE_FPS = 20; // ARDY `core` checkpoint fps (echoed by /motion/models)
+// the two frame counts the pose-enhance model accepts, at its fixed 24fps
+const ltxSeconds = (fullLength: boolean) => (fullLength ? 241 : 121) / 24;
+// What a take IS, chosen before you author: the shot camera, the preview loop and
+// the recorder all run on this one length, so the rehearsal is the take.
+type TakeMode = "raw" | "ltx5" | "ltx10";
+const TAKE_MODES: { id: TakeMode; label: string }[] = [
+  { id: "raw", label: "10s raw" },
+  { id: "ltx5", label: "LTX 5s" },
+  { id: "ltx10", label: "LTX 10s" },
+];
+const modeSeconds = (mode: TakeMode) => (mode === "raw" ? TAKE_SECONDS : ltxSeconds(mode === "ltx10"));
 
 // The ARDY rig faces +Z (its toe sits at +Z); a VRM after rotateVRM0 faces -Z.
 const YAW_SKEL = 0;
@@ -43,7 +54,7 @@ const VRM_BONE: Record<string, string> = {
 };
 
 type CamKey = { pos: THREE.Vector3; target: THREE.Vector3 };
-type Take = { url: string; blob: Blob; duration: number; ltxReady: boolean };
+type Take = { url: string; blob: Blob; duration: number; ltxReady: boolean; fullLength: boolean };
 type Vec3 = [number, number, number];
 type StageSave = {
   actors: { name: string; colorHex: number; spawn: Vec3; waypoints: [number, number][]; motion: Motion | null; prompt: string; vrmUrl: string | null }[];
@@ -212,13 +223,18 @@ class Stage {
   recording = false;
   active = true;
   onTick: () => void = () => {};
-  onRecorded: (b: Blob, meta: { duration: number; ltxReady: boolean }) => void = () => {};
+  onRecorded: (b: Blob, meta: { duration: number; ltxReady: boolean; fullLength: boolean }) => void = () => {};
   private clock = new THREE.Clock();
   private raf = 0;
   private recorder: MediaRecorder | null = null;
   private recStartMs = 0;
+  takeMode: TakeMode = "raw";
+  get takeSeconds() {
+    return modeSeconds(this.takeMode);
+  }
   private recSeconds = TAKE_SECONDS;
   private recLtx = false;
+  private recLtxFull = false;
   private recTimer = 0;
   private recStream: MediaStream | null = null;
   private ground: THREE.Mesh;
@@ -432,19 +448,24 @@ class Stage {
   private applyShotCam() {
     const a = this.camA ?? this.keyFromView();
     const b = this.camB ?? a;
-    const k = smoothstep(Math.max(0, Math.min(1, this.t / TAKE_SECONDS)));
+    // over the take's own length, not a fixed 10s: a 5s take must still travel
+    // the whole authored A→B move, not stop halfway.
+    const k = smoothstep(Math.max(0, Math.min(1, this.t / this.takeSeconds)));
     this.shotCam.position.lerpVectors(a.pos, b.pos, k);
     this._v.lerpVectors(a.target, b.target, k);
     this.shotCam.lookAt(this._v);
   }
 
-  record(ltxReady = false) {
+  record(mode: TakeMode = this.takeMode) {
     if (this.recording) return;
+    this.takeMode = mode;
+    const ltxReady = mode !== "raw";
     this.recLtx = ltxReady;
-    this.recSeconds = ltxReady ? 121 / 24 : TAKE_SECONDS;
+    this.recLtxFull = mode === "ltx10";
+    this.recSeconds = this.takeSeconds;
     if (ltxReady) {
       // The enhancement model expects a 768×448, 24fps control input.
-      // MediaRecorder may emit a frame or two either side of 121.
+      // MediaRecorder may emit a frame or two either side of the 121/241 target.
       this.renderer.setPixelRatio(1);
       this.renderer.setSize(768, 448, false);
       for (const camera of [this.authorCam, this.shotCam]) {
@@ -457,7 +478,12 @@ class Stage {
     const rec = new MediaRecorder(this.recStream, { mimeType: mime, videoBitsPerSecond: 8_000_000 });
     const chunks: Blob[] = [];
     rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-    rec.onstop = () => this.onRecorded(new Blob(chunks, { type: mime || "video/webm" }), { duration: this.recSeconds, ltxReady: this.recLtx });
+    rec.onstop = () =>
+      this.onRecorded(new Blob(chunks, { type: mime || "video/webm" }), {
+        duration: this.recSeconds,
+        ltxReady: this.recLtx,
+        fullLength: this.recLtxFull,
+      });
     // Nothing that is an authoring aid may appear in a control video the AI pass
     // conditions on — gizmo and waypoint markers/paths alike.
     const helper = (this.gizmo as any)?.getHelper?.() ?? (this.gizmo as unknown as THREE.Object3D);
@@ -515,7 +541,7 @@ class Stage {
       this.onTick();
     } else if (this.playing) {
       this.t += dt;
-      if (this.t >= TAKE_SECONDS) this.t = 0;
+      if (this.t >= this.takeSeconds) this.t = 0;
       this.onTick();
     }
     for (const a of this.actors) {
@@ -616,7 +642,16 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
   const [uploadedTake, setUploadedTake] = useState<UploadResponse | null>(null);
   const [enhancePrompt, setEnhancePrompt] = useState("");
   const [referenceSheet, setReferenceSheet] = useState("");
+  // blank = let the model roll its own; a pinned seed is what keeps a series on model
+  const [seed, setSeed] = useState("");
+  // 1 = the skeleton is law; lower it to trade pose fidelity for the model's own motion sense
+  const [guideStrength, setGuideStrength] = useState(1);
+  const [takeMode, setTakeMode] = useState<TakeMode>("raw");
+  const takeSeconds = modeSeconds(takeMode);
   const [enhancing, setEnhancing] = useState(false);
+  // what the render is actually doing — a long job and a hung one look identical
+  // from a spinner alone
+  const [jobNote, setJobNote] = useState("");
   const [finishedTake, setFinishedTake] = useState<Artifact | null>(null);
   const uploadedTakeRef = useRef<UploadResponse | null>(null);
   const promptRef = useRef(prompt);
@@ -632,6 +667,7 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
       setPlaying(stage.playing);
       setRecording(stage.recording);
       setCamMode(stage.camMode);
+      setTakeMode(stage.takeMode);
       setSelected(stage.selected);
       setActors(stage.actors.map((a) => ({ id: a.id, name: a.name, colorHex: a.colorHex, waypoints: a.waypoints.length,
         prompt: a.prompt, hasMotion: !!a.motion, genSeconds: a.motion?.generation_seconds ?? null })));
@@ -687,8 +723,9 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
     };
     psRef.current.registerSuggestions("animate", [
       { label: "Add an actor", run: () => stageRef.current?.addActor() },
-      { label: "Record a 10s take", run: () => stageRef.current?.record() },
-      { label: "Record a 5s LTX control take", run: () => stageRef.current?.record(true) },
+      { label: "Record a 10s take", run: () => stageRef.current?.record("raw") },
+      { label: "Record a 5s LTX control take", run: () => stageRef.current?.record("ltx5") },
+      { label: "Record a 10s LTX control take", run: () => stageRef.current?.record("ltx10") },
     ]);
     // Detect whether the ARDY motion service is reachable, so the UI can say so
     // plainly instead of failing at the first Generate.
@@ -809,6 +846,13 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
     });
   }
 
+  function applyTakeMode(mode: TakeMode) {
+    const s = stage();
+    s.takeMode = mode;
+    s.t = Math.min(s.t, s.takeSeconds); // a shorter take can't sit past its own end
+    s.onTick();
+  }
+
   async function saveToMedia() {
     if (!take) return;
     if (!ps.apiKey) return ps.toast("Add your key in Settings to save takes");
@@ -826,7 +870,7 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
 
   async function enhanceTake() {
     if (!take) return ps.toast("Record an ARDY take first");
-    if (!take.ltxReady) return ps.toast("Record a 5s LTX control take before running pose-controlled enhancement");
+    if (!take.ltxReady) return ps.toast("Record in LTX 5s or LTX 10s mode before running pose-controlled enhancement");
     if (!ps.apiKey) return ps.toast("Add your key in Settings to finish the take");
     if (!pickModel(ps.models, "motion_video")) return ps.toast("Pose-controlled enhancement is not available through the Pioneer API");
     const fallbackPrompt = stage().actors
@@ -834,13 +878,27 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
       .join(". ");
     const visualPrompt = enhancePrompt.trim() || `${fallbackPrompt}. cinematic live-action finish, coherent character identity, detailed environment`;
     setEnhancing(true);
+    setJobNote("uploading the control take…");
     ps.setAiState("finishing ARDY take with LTX", true);
+    const startedAt = Date.now();
     try {
       const uploaded = await uploadCurrentTake();
+      setJobNote("submitting…");
       const result = await enhanceMotionVideo(ps, visualPrompt, uploaded.url, {
         referenceSheet: referenceSheet || undefined,
+        fullLength: take.fullLength,
+        guideStrength,
+        seed: seed.trim() && Number.isFinite(Number(seed)) ? Number(seed) : undefined,
+        onPoll: (s) => {
+          const elapsed = Math.round((Date.now() - startedAt) / 1000);
+          const note = [s.status, s.stage, s.log_tail?.at(-1)].filter(Boolean).join(" · ");
+          // full job id, not a prefix: it is the only handle for asking the API
+          // what happened to a job that never came back
+          setJobNote(`${note} · ${elapsed}s · job ${s.job_id}`);
+          ps.setAiState(`LTX ${s.stage || s.status} ${elapsed}s`, true);
+        },
       });
-      const duration = 121 / 24;
+      const duration = ltxSeconds(take.fullLength);
       queueStudioAsset({
         projectId: ps.board?.id || "default",
         sourceId: `ltx-ardy:${result.url}`,
@@ -851,9 +909,12 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
         duration,
       });
       setFinishedTake(result);
+      setJobNote(`done in ${Math.round((Date.now() - startedAt) / 1000)}s`);
       ps.refreshMedia();
       ps.toast(`LTX finished ${duration.toFixed(1)}s of authored ARDY motion and queued it in Studio`, "gold");
     } catch (e: any) {
+      // toasts expire; a failed paid job's reason has to stay on screen
+      setJobNote(`failed after ${Math.round((Date.now() - startedAt) / 1000)}s: ${String(e.message || e)}`);
       ps.toast(`LTX finish failed: ${String(e.message || e).slice(0, 140)}`);
     } finally {
       setEnhancing(false);
@@ -861,8 +922,8 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
     }
   }
 
-  const actionFnsRef = useRef({ generate, saveToMedia, enhanceTake });
-  actionFnsRef.current = { generate, saveToMedia, enhanceTake };
+  const actionFnsRef = useRef({ generate, saveToMedia, enhanceTake, applyTakeMode });
+  actionFnsRef.current = { generate, saveToMedia, enhanceTake, applyTakeMode };
   useEffect(() => {
     registerActions([
       {
@@ -885,7 +946,10 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
           prompt: promptRef.current,
           recording: !!stageRef.current?.recording,
           hasTake: !!take,
+          takeMode: stageRef.current?.takeMode,
+          takeSeconds: stageRef.current?.takeSeconds,
           ltxReadyTake: !!take?.ltxReady,
+          ltxTakeSeconds: take?.ltxReady ? ltxSeconds(take.fullLength) : null,
           takeUploaded: !!uploadedTake,
           poseVideoModel: pickModel(psRef.current.models, "motion_video")?.model || null,
           hasFinishedTake: !!finishedTake,
@@ -921,21 +985,23 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
         run: () => actionFnsRef.current.generate(),
       },
       {
-        name: "animate.record_take",
-        description: "Record the staged 10-second shot to a local take",
-        run: () => stageRef.current?.record(),
+        name: "animate.set_take_mode",
+        description: "Set the take length the preview and recorder both run on: raw (10s), ltx5 or ltx10 (768×448, 24fps control take)",
+        parameters: { type: "object", properties: { mode: { type: "string", enum: ["raw", "ltx5", "ltx10"] } }, required: ["mode"], additionalProperties: false },
+        run: (params) => actionFnsRef.current.applyTakeMode(params?.mode as TakeMode),
       },
       {
-        name: "animate.record_ltx_take",
-        description: "Record the first five seconds as a 768×448, 24fps LTX control take",
-        run: () => stageRef.current?.record(true),
+        name: "animate.record_take",
+        description: "Record the staged shot to a local take, optionally switching take mode first",
+        parameters: { type: "object", properties: { mode: { type: "string", enum: ["raw", "ltx5", "ltx10"] } }, additionalProperties: false },
+        run: (params) => stageRef.current?.record(params?.mode as TakeMode | undefined),
       },
       {
         name: "animate.save_take",
         description: "Upload the current raw take to Project Media",
         confirmation: "Uploads and stores the current take in Project Media",
         run: () => {
-          if (!take?.ltxReady) throw new Error("record a 5s LTX control take first");
+          if (!take?.ltxReady) throw new Error("record an LTX control take first");
           return actionFnsRef.current.saveToMedia();
         },
       },
@@ -969,6 +1035,7 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
       }}
     >
       <div className="stage-canvas" ref={mountRef} />
+      {takeMode !== "raw" && !recording && <div className="ltx-frame" />}
 
       <div className="stage-hud">
         <div className="stage-panel col">
@@ -1167,7 +1234,7 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
         <input
           type="range"
           min={0}
-          max={TAKE_SECONDS}
+          max={takeSeconds}
           step={0.01}
           value={t}
           disabled={recording}
@@ -1177,13 +1244,21 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
           }}
         />
         <span className="sp-info">
-          {t.toFixed(1)}s / {TAKE_SECONDS}s
+          {t.toFixed(1)}s / {takeSeconds.toFixed(takeMode === "raw" ? 0 : 2)}s
         </span>
+        {TAKE_MODES.map((m) => (
+          <button
+            key={m.id}
+            type="button"
+            className={`sp-btn${takeMode === m.id ? " on" : ""}`}
+            disabled={recording}
+            onClick={() => applyTakeMode(m.id)}
+          >
+            {m.label}
+          </button>
+        ))}
         <button type="button" className={`sp-btn rec${recording ? " on" : ""}`} disabled={recording} onClick={() => stage().record()}>
           {recording ? "Recording…" : "● Record take"}
-        </button>
-        <button type="button" className="sp-btn gen" disabled={recording} onClick={() => stage().record(true)}>
-          ● LTX 5s
         </button>
       </div>
 
@@ -1191,7 +1266,7 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
         <div className="stage-take">
           <div className="st-title">
             <span className="sp-label">ARDY control take</span>
-            <span className="sp-info">{take.ltxReady ? "LTX bucket" : `${take.duration.toFixed(0)}s raw`} · {uploadedTake ? "uploaded" : "local"}</span>
+            <span className="sp-info">{take.ltxReady ? `LTX ${take.fullLength ? "10s" : "5s"}` : `${take.duration.toFixed(0)}s raw`} · {uploadedTake ? "uploaded" : "local"}</span>
           </div>
           <video src={take.url} controls autoPlay loop muted />
           <div className="st-row">
@@ -1218,7 +1293,7 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
           <div className="ltx-finish">
             <div className="st-title">
               <span className="sp-label">LTX pose finish</span>
-              <span className="sp-info">{motionVideoModel ? "1000 cr · 5s" : "not exposed"}</span>
+              <span className="sp-info">{motionVideoModel ? (take.fullLength ? "2000 cr · 10s" : "1000 cr · 5s") : "not exposed"}</span>
             </div>
             <textarea
               className="sp-prompt"
@@ -1227,18 +1302,41 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
               placeholder="Describe the final character, scene, lighting and camera style…"
               onChange={(event) => setEnhancePrompt(event.target.value)}
             />
-            <select className="st-select" value={referenceSheet} onChange={(event) => setReferenceSheet(event.target.value)}>
-              <option value="">No identity reference</option>
-              {referenceImages.map((object) => (
-                <option key={object.key} value={object.url}>{object.name}</option>
-              ))}
-            </select>
+            <div className="st-row">
+              <select className="st-select" value={referenceSheet} onChange={(event) => setReferenceSheet(event.target.value)}>
+                <option value="">No identity reference</option>
+                {referenceImages.map((object) => (
+                  <option key={object.key} value={object.url}>{object.name}</option>
+                ))}
+              </select>
+              <input
+                className="st-select"
+                type="number"
+                min={0}
+                step={1}
+                value={seed}
+                placeholder="Seed (blank = random)"
+                onChange={(event) => setSeed(event.target.value)}
+              />
+            </div>
+            <label className="st-row between">
+              <span className="sp-info">Pose hold {guideStrength.toFixed(2)}</span>
+              <input
+                type="range"
+                min={0.3}
+                max={1}
+                step={0.05}
+                value={guideStrength}
+                onChange={(event) => setGuideStrength(Number(event.target.value))}
+              />
+            </label>
             <div className="st-row between">
-              <span className="sp-info hint">{take.ltxReady ? "IC-LoRA capture profile" : "record with “LTX 5s” first"}</span>
+              <span className="sp-info hint">{take.ltxReady ? "IC-LoRA capture profile" : "record in an LTX mode first"}</span>
               <button type="button" className="sp-btn gen" disabled={!motionVideoModel || !take.ltxReady || enhancing} onClick={enhanceTake}>
                 {enhancing ? "LTX rendering…" : "Finish motion"}
               </button>
             </div>
+            {jobNote && <div className={`sp-info hint job-note${jobNote.startsWith("failed") ? " warn" : ""}`}>{jobNote}</div>}
             {!motionVideoModel && <div className="sp-info hint warn">Pose-controlled enhancement is currently unavailable.</div>}
           </div>
           {finishedTake && (

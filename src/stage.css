@@ -12,6 +12,19 @@
   height: 100%;
   display: block;
 }
+/* what the 768×448 take will actually keep. Vertical FOV is fixed, so the frame
+   is always full height and 12:7 wide — wider than the viewport it just clips,
+   which reads correctly as "the take sees past the edge". */
+.ltx-frame {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  aspect-ratio: 12 / 7;
+  border: 1px dashed rgba(233, 196, 106, 0.5);
+  pointer-events: none;
+}
 .stage-hud {
   position: absolute;
   top: 14px;
@@ -277,4 +290,12 @@
 .sp-info.hint.warn {
   color: #f0a89e;
   opacity: 0.9;
+}
+/* a running job's own words — must stay readable and wrap, however long */
+.sp-info.hint.job-note {
+  opacity: 0.85;
+  white-space: normal;
+  word-break: break-word;
+  font-family: ui-monospace, monospace;
+  line-height: 1.4;
 }

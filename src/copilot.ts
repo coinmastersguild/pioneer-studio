@@ -38,7 +38,8 @@ Param rules by endpoint:
 - edit: {"prompt": "..."} + exactly 1 image ref
 - multi_reference: {"prompt": "..."} + up to 4 image refs
 - lipsync: {} + 1 image ref and 1 audio ref (optionally "size": "256*256"|"480*832"|"1024*704")
-- enhance: {"prompt": "...", optional "num_frames": 121|241, optional "guide_strength": 0..1} + exactly 1 ARDY/control video ref and optionally 1 image reference sheet
+- enhance: {"prompt": "...", optional "num_frames": 121|241, optional "guide_strength": 0..1, optional "width"/"height"} + exactly 1 control video ref and optionally 1 image reference sheet. The control video carries the motion — write the prompt about look, not movement.
+Default width/height to 1536x896 on enhance and 1536x896 on ltx-2.3 video unless the user asks for something else; the model's own default is small and reads soft.
 Never put URLs in params — the client injects ref URLs. Write the generation prompt yourself: concrete, cinematic, specific.`;
 }
 

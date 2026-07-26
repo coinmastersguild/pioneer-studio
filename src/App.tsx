@@ -18,6 +18,7 @@ import {
   restoreActiveProject,
   setSyncErrorHandler,
   type JobModel,
+  type JobStatus,
   type ChatMessage,
   type MediaList,
   type Storyboard,
@@ -265,7 +266,7 @@ function App() {
       await sleep(24);
     }
   }
-  async function waitForJob(jobId: string): Promise<{ url: string; contentType: string }> {
+  async function waitForJob(jobId: string, onPoll?: (s: JobStatus) => void): Promise<{ url: string; contentType: string }> {
     const key = apiKeyRef.current;
     // Backoff, not a flat 3s. The old loop slept 3000ms *before* its first poll,
     // so even a job that finished in 1.9s (a short TTS line) could not be
@@ -277,6 +278,7 @@ function App() {
       await sleep(wait);
       wait = Math.min(3000, wait * 1.6);
       const s = await pollJob(key, jobId);
+      onPoll?.(s);
       if (s.status === "done") {
         const r = await fetchResultUrl(key, jobId);
         refreshMedia(); // format=url stored the result to R2

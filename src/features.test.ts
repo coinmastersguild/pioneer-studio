@@ -73,6 +73,67 @@ test("pose-controlled LTX is routed separately from ordinary video", () => {
   expect(pickModel(models, "motion_video")?.model).toBe("ltx-enhance");
 });
 
+test("MediaPipe landmarks map onto the cskel27 joints the control take draws", async () => {
+  const { mapLandmarks, CSKEL_BONES, boneColor, fitBox } = await import("./poseExtract");
+  // a crude standing figure: shoulders at y .3, hips at y .5, feet at y .9
+  const lm = Array.from({ length: 33 }, () => ({ x: 0.5, y: 0.5, visibility: 1 }));
+  lm[7] = { x: 0.48, y: 0.2, visibility: 1 }; // left ear
+  lm[8] = { x: 0.52, y: 0.2, visibility: 1 }; // right ear
+  lm[11] = { x: 0.4, y: 0.3, visibility: 1 }; // left shoulder
+  lm[12] = { x: 0.6, y: 0.3, visibility: 1 }; // right shoulder
+  lm[23] = { x: 0.45, y: 0.5, visibility: 1 }; // left hip
+  lm[24] = { x: 0.55, y: 0.5, visibility: 1 }; // right hip
+  const j = mapLandmarks(lm);
+  expect(j.Hips).toEqual({ x: 0.5, y: 0.5, v: 1 });
+  expect(j.Neck).toEqual({ x: 0.5, y: 0.3, v: 1 });
+  expect(j.Head.y).toBeCloseTo(0.2, 5);
+  // the spine climbs from hips to neck without overshooting either end
+  expect(j.Spine.y).toBeGreaterThan(j.Spine1.y);
+  expect(j.Spine1.y).toBeGreaterThan(j.Spine3.y);
+  expect(j.Spine3.y).toBeGreaterThan(j.Neck.y);
+  // every bone the renderer draws must resolve to two mapped joints
+  for (const [a, b] of CSKEL_BONES) {
+    expect(j[a]).toBeDefined();
+    expect(j[b]).toBeDefined();
+  }
+  // left/right stay tinted apart — that is the pass's only side signal
+  expect(boneColor("LeftHand")).not.toBe(boneColor("RightHand"));
+  // a portrait source letterboxes instead of stretching
+  const box = fitBox(1080, 1920);
+  expect(box.w).toBeLessThan(768);
+  expect(Math.round(box.h)).toBe(448);
+});
+
+test("plain language routes to the local skeleton flow, not the paid one", async () => {
+  const { wantsSkeleton, matchFlow } = await import("./flows");
+  expect(wantsSkeleton("extract the pose from this clip")).toBe(true);
+  expect(wantsSkeleton("get a skeleton from my video")).toBe(true);
+  expect(wantsSkeleton("dwpose this")).toBe(true);
+  // asking to USE a control video is a paid render, not an extraction
+  expect(wantsSkeleton("use this video as the control for my character")).toBe(false);
+  expect(matchFlow("use this video as the control for my character")?.id).toBe("video-control");
+});
+
+test("a control flow is gated on its required slots and builds the job it promises", async () => {
+  const { flowById, missingSlots, matchFlow } = await import("./flows");
+  const flow = flowById("video-control")!;
+  expect(missingSlots(flow, {}).map((s) => s.id)).toEqual(["control", "prompt"]);
+  expect(missingSlots(flow, { control: "https://r2/take.webm", prompt: "golden hour" })).toEqual([]);
+  // the optional identity sheet must not appear as a param when it was never filled
+  const params = flow.build({ control: "https://r2/take.webm", prompt: "golden hour", size: "1536x896", frames: "241", guide: "0.85" });
+  expect(params).toEqual({
+    prompt: "golden hour",
+    control_video: "https://r2/take.webm",
+    width: 1536,
+    height: 896,
+    num_frames: 241,
+    frame_rate: 24,
+    guide_strength: 0.85,
+  });
+  expect(matchFlow("drive this video with a pose control")?.id).toBe("video-control");
+  expect(matchFlow("make me a lofi track")).toBeUndefined();
+});
+
 test("pose-controlled LTX receives one control video and one identity sheet", () => {
   const refs = [
     { key: "take", name: "ardy.webm", url: "https://media.example/ardy.webm", content_type: "video/webm", type: "reference", bytes: 1, added: 1 },

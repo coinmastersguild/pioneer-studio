@@ -1,5 +1,5 @@
 // Shared bits between the shell and the four views.
-import type { JobModel, MediaList, Storyboard } from "./api";
+import type { JobModel, JobStatus, MediaList, Storyboard } from "./api";
 
 export type Mode = "chat" | "board" | "create" | "animate" | "head" | "studio" | "media" | "models" | "projects" | "companies" | "settings";
 
@@ -27,8 +27,10 @@ export type PS = {
   setInputHandler(mode: Mode, fn: (text: string) => void): void;
   isBusy(): boolean;
   setBusy(b: boolean): void;
-  // shared job helper: poll a job until done, persist result to R2, return its URL
-  waitForJob(jobId: string): Promise<{ url: string; contentType: string }>;
+  // shared job helper: poll a job until done, persist result to R2, return its URL.
+  // onPoll sees every status the server reports — a long render is otherwise
+  // indistinguishable from a hung one.
+  waitForJob(jobId: string, onPoll?: (s: JobStatus) => void): Promise<{ url: string; contentType: string }>;
 };
 
 export const GB = 1024 ** 3;

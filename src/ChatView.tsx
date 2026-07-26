@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { submitJob, uploadMedia, type MediaObject } from "./api";
 import { injectRefs, requestJobPlan } from "./copilot";
+import FlowCard from "./FlowCard";
+import SkeletonCard from "./SkeletonCard";
+import { FLOWS, flowById, flowIsLive, matchFlow, wantsSkeleton, type Flow } from "./flows";
 import { IcCopy, IcImage, IcMusic, IcPlay, IcSend, IcSpark, kindOf, sleep, type PS } from "./shared";
 
 type PlanInfo = {
@@ -21,7 +24,9 @@ type JobInfo = {
 type Part =
   | { id: number; type: "text"; text: string }
   | { id: number; type: "plan"; plan: PlanInfo }
-  | { id: number; type: "job"; job: JobInfo };
+  | { id: number; type: "job"; job: JobInfo }
+  | { id: number; type: "flow"; flowId: string }
+  | { id: number; type: "skeleton" };
 type Turn = { id: number; who: "user" | "ai"; parts: Part[] };
 
 // mirrors copilot injectRefs — only these refs actually reach the job params
@@ -88,6 +93,7 @@ function Wave({ on }: { on: boolean }) {
 export default function ChatView({ ps }: { ps: PS }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [text, setText] = useState("");
+  const [dropping, setDropping] = useState(false);
   const scroll = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -129,6 +135,27 @@ export default function ChatView({ ps }: { ps: PS }) {
     }
   }
 
+  // Walk the user into a flow instead of guessing a one-shot job: the card
+  // states what it needs, so an unfilled slot is a visible gap, not a failed job.
+  async function openFlow(flow: Flow, intro?: string) {
+    const aiTurn = addTurn("ai");
+    await streamText(aiTurn, intro || `${flow.title}. ${flow.blurb}`);
+    for (const line of flow.walkthrough) await streamText(aiTurn, line);
+    addPart(aiTurn, { type: "flow", flowId: flow.id } as Omit<Part, "id">);
+  }
+  const openFlowRef = useRef(openFlow);
+  openFlowRef.current = openFlow;
+
+  async function openSkeleton() {
+    const aiTurn = addTurn("ai");
+    await streamText(aiTurn, "Video → skeleton. The pose comes out of real footage instead of being authored.");
+    await streamText(aiTurn, "Drop a clip with one person in frame and pick the five seconds worth keeping.");
+    await streamText(aiTurn, "It runs in your browser, so it costs nothing, and the take lands in your media store ready to drive a render.");
+    addPart(aiTurn, { type: "skeleton" } as Omit<Part, "id">);
+  }
+  const openSkeletonRef = useRef(openSkeleton);
+  openSkeletonRef.current = openSkeleton;
+
   async function fire(input: string) {
     const p = psRef.current;
     const t = (input || "").trim();
@@ -136,6 +163,15 @@ export default function ChatView({ ps }: { ps: PS }) {
     setText("");
     if (box.current) box.current.style.height = "auto";
     addTurn("user", [{ id: nextId.current++, type: "text", text: t }]);
+    if (wantsSkeleton(t)) {
+      await openSkeleton();
+      return;
+    }
+    const wanted = matchFlow(t);
+    if (wanted && flowIsLive(wanted, p.models)) {
+      await openFlow(wanted, `That's a control flow, not a one-shot job — here's the card. ${wanted.blurb}`);
+      return;
+    }
     if (!p.apiKey) {
       const aiT = addTurn("ai");
       await streamText(aiT, "Add your sk-pioneer key in Settings first — I can't run jobs without it.");
@@ -210,9 +246,10 @@ export default function ChatView({ ps }: { ps: PS }) {
 
   useEffect(() => {
     ps.registerSuggestions("chat", [
+      { label: "Video → skeleton", run: () => openSkeletonRef.current() },
+      ...FLOWS.map((f) => ({ label: f.title, run: () => openFlowRef.current(f) })),
       { label: "Dawn keyframe of my ranger", run: () => fireRef.current(STARTERS[0].prompt) },
       { label: "Score it — 45s forest bed", run: () => fireRef.current(STARTERS[1].prompt) },
-      { label: "Character sheet turnaround", run: () => fireRef.current(STARTERS[3].prompt) },
     ]);
     ps.setInputHandler("chat", (t) => fireRef.current(t));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -233,7 +270,24 @@ export default function ChatView({ ps }: { ps: PS }) {
   }
 
   return (
-    <div className="chat-wrap">
+    <div
+      className={`chat-wrap${dropping ? " dropping" : ""}`}
+      onDragOver={(e) => {
+        if (!e.dataTransfer.types.includes("Files")) return;
+        e.preventDefault();
+        setDropping(true);
+      }}
+      onDragLeave={(e) => {
+        if (e.currentTarget === e.target) setDropping(false);
+      }}
+      onDrop={(e) => {
+        // a card that handled the drop stopped propagation; anything reaching
+        // here is meant for the media store
+        e.preventDefault();
+        setDropping(false);
+        if (e.dataTransfer.files.length) onAttach(e.dataTransfer.files);
+      }}
+    >
       <div className="chat-scroll" id="chatScroll" ref={scroll}>
         <div className="chat-inner" id="chatInner">
           {turns.length === 0 && (
@@ -255,6 +309,17 @@ export default function ChatView({ ps }: { ps: PS }) {
                   </button>
                 ))}
               </div>
+              <div className="flow-row">
+                <span className="fr-label">…or run a control flow — drop files straight onto the card</span>
+                <button type="button" className="fr-btn" onClick={() => openSkeleton()}>
+                  Video → skeleton
+                </button>
+                {FLOWS.map((f) => (
+                  <button key={f.id} type="button" className="fr-btn" disabled={!flowIsLive(f, ps.models)} onClick={() => openFlow(f)}>
+                    {f.title}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
           {turns.map((turn) => (
@@ -264,6 +329,11 @@ export default function ChatView({ ps }: { ps: PS }) {
                 <div className="name">{turn.who === "user" ? "You" : "Copilot"}</div>
                 {turn.parts.map((part) => {
                   if (part.type === "text") return <p key={part.id}>{part.text}</p>;
+                  if (part.type === "skeleton") return <SkeletonCard key={part.id} ps={ps} />;
+                  if (part.type === "flow") {
+                    const f = flowById(part.flowId);
+                    return f ? <FlowCard key={part.id} flow={f} ps={ps} /> : null;
+                  }
                   if (part.type === "plan") {
                     const pl = part.plan;
                     return (
@@ -414,7 +484,7 @@ export default function ChatView({ ps }: { ps: PS }) {
         ref={fileInput}
         type="file"
         multiple
-        accept="image/png,image/jpeg,image/webp,audio/*"
+        accept="image/png,image/jpeg,image/webp,audio/*,video/mp4,video/webm"
         style={{ display: "none" }}
         onChange={(e) => {
           if (e.target.files?.length) onAttach(e.target.files);

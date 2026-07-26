@@ -3,7 +3,7 @@
 // localStorage per storyboard id.
 // Uses localStorage for local-only projects. The isolated load/save boundary can
 // be replaced with server-backed persistence without changing these data shapes.
-import { API_BASE, authHeaders, blobToDataUrl, chatCompletion, submitJob, uploadMedia, type JobModel, type Shot } from "./api";
+import { API_BASE, authHeaders, blobToDataUrl, chatCompletion, submitJob, uploadMedia, type JobModel, type JobStatus, type Shot } from "./api";
 import { kindOf, type PS } from "./shared";
 import type { StudioExportPlan } from "./studioTimeline";
 
@@ -244,10 +244,14 @@ export function pickModel(
 }
 
 /* ── jobs ── */
-async function runJob(ps: PS, m: JobModel, params: Record<string, unknown>): Promise<Artifact> {
+// every status the server reports on a job, submit included
+export type JobWatcher = (s: JobStatus) => void;
+
+async function runJob(ps: PS, m: JobModel, params: Record<string, unknown>, onPoll?: JobWatcher): Promise<Artifact> {
   const sub = await submitJob(ps.apiKey, m.model, m.endpoint, params);
   ps.charge(sub.credits_remaining ?? null);
-  const { url, contentType } = await ps.waitForJob(sub.job_id);
+  onPoll?.({ job_id: sub.job_id, status: sub.status || "queued", stage: null, error: null });
+  const { url, contentType } = await ps.waitForJob(sub.job_id, onPoll);
   return { url, content_type: contentType };
 }
 
@@ -283,21 +287,26 @@ export async function enhanceMotionVideo(
   ps: PS,
   prompt: string,
   controlVideo: string,
-  opts?: { referenceSheet?: string; fullLength?: boolean; guideStrength?: number; seed?: number },
+  opts?: { referenceSheet?: string; fullLength?: boolean; guideStrength?: number; seed?: number; onPoll?: JobWatcher },
 ): Promise<Artifact> {
   const m = pickModel(ps.models, "motion_video");
   if (!m) throw new Error("pose-controlled LTX is not available right now");
-  return runJob(ps, m, {
-    prompt,
-    control_video: controlVideo,
-    ...(opts?.referenceSheet ? { reference_sheet: opts.referenceSheet } : {}),
-    width: 768,
-    height: 448,
-    num_frames: opts?.fullLength ? 241 : 121,
-    frame_rate: 24,
-    guide_strength: opts?.guideStrength ?? 1,
-    ...(opts?.seed == null ? {} : { seed: opts.seed }),
-  });
+  return runJob(
+    ps,
+    m,
+    {
+      prompt,
+      control_video: controlVideo,
+      ...(opts?.referenceSheet ? { reference_sheet: opts.referenceSheet } : {}),
+      width: 768,
+      height: 448,
+      num_frames: opts?.fullLength ? 241 : 121,
+      frame_rate: 24,
+      guide_strength: opts?.guideStrength ?? 1,
+      ...(opts?.seed == null ? {} : { seed: opts.seed }),
+    },
+    opts?.onPoll,
+  );
 }
 
 // TTS: use a listed jobs model or fall back to the direct /api/v1/tts route.
