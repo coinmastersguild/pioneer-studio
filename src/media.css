@@ -40,3 +40,23 @@ table.files tbody tr:hover td{ background:var(--bg-hover); }
 .mini-btn:hover{ color:var(--fg1); border-color:var(--border-strong); }
 .mini-btn svg{ width:11px; height:11px; }
 .mini-btn.copied{ color:var(--accent); border-color:rgba(74,222,128,.35); }
+
+/* full-size look at one object, and the per-row actions that open it */
+.fcell.open{ cursor:pointer; }
+.fcell.open:hover .fname{ color:var(--accent); }
+.frow-actions{ display:flex; gap:6px; align-items:center; justify-content:flex-end; flex-wrap:wrap; }
+.media-lightbox{
+  position:fixed; inset:0; z-index:60; background:rgba(4,10,7,.78);
+  display:grid; place-items:center; padding:24px; backdrop-filter:blur(3px);
+}
+.ml-card{
+  background:var(--card); border:1px solid var(--border-strong); border-radius:var(--radius-lg);
+  max-width:min(92vw,1100px); max-height:90vh; display:flex; flex-direction:column; overflow:hidden;
+}
+.ml-head{ display:flex; align-items:center; gap:10px; padding:11px 14px; border-bottom:1px solid var(--border); }
+.ml-head b{ font-size:13px; }
+.ml-head .ml-meta{ margin-left:auto; font-family:var(--mono); font-size:11px; color:var(--fg3); }
+.ml-body{ padding:14px; overflow:auto; display:grid; place-items:center; }
+.ml-body img, .ml-body video{ max-width:100%; max-height:66vh; border-radius:var(--radius-md); display:block; }
+.ml-none{ color:var(--fg3); font-size:12.5px; padding:40px; }
+.ml-foot{ display:flex; gap:8px; padding:11px 14px; border-top:1px solid var(--border); }

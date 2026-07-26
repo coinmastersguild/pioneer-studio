@@ -214,7 +214,7 @@ export const beatRefs = (p: Pipeline, ext: BeatExt): string[] =>
 /* ── model picking — the server's models list decides what's live ── */
 export function pickModel(
   models: JobModel[],
-  want: "image" | "image_refs" | "video" | "motion_video" | "tts" | "music",
+  want: "image" | "image_refs" | "image_edit" | "video" | "motion_video" | "tts" | "music",
 ): JobModel | undefined {
   const has = (m: JobModel, re: RegExp) => re.test(`${m.model} ${m.endpoint} ${m.note || ""}`);
   // s2v/lipsync models are speech-driven and the pose-enhance model is control-video
@@ -231,6 +231,12 @@ export function pickModel(
       return models.find((m) => has(m, /tts|speech|voice|kokoro/i));
     case "music":
       return models.find((m) => has(m, /music|acestep/i));
+    case "image_edit":
+      // Editing an existing still, never regenerating it from scratch. Mage-Flow's
+      // edit checkpoint wins when the account exposes it; flux2-dev edit until then.
+      return (
+        models.find((m) => m.endpoint === "edit" && has(m, /mage/i)) || models.find((m) => m.endpoint === "edit")
+      );
     case "image_refs":
       // genImage handles both param shapes, so an edit-endpoint model is a valid ref model
       return models.find((m) => !isVid(m) && m.endpoint === "multi_reference") || models.find((m) => !isVid(m) && m.endpoint === "edit");

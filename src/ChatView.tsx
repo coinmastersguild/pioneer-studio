@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { submitJob, uploadMedia, type MediaObject } from "./api";
 import { injectRefs, requestJobPlan } from "./copilot";
+import { consumeChatMedia } from "./chatHandoff";
 import FlowCard from "./FlowCard";
 import SkeletonCard from "./SkeletonCard";
 import { FLOWS, flowById, flowIsLive, matchFlow, wantsSkeleton, type Flow } from "./flows";
@@ -243,6 +244,24 @@ export default function ChatView({ ps }: { ps: PS }) {
 
   const fireRef = useRef(fire);
   fireRef.current = fire;
+
+  // Media handed over from the Media table: show it, and put its name in the
+  // composer so the planner wires it in as a ref on the next thing you ask for.
+  useEffect(() => {
+    const handed = consumeChatMedia();
+    if (!handed) return;
+    const turn = addTurn("ai", [
+      { id: nextId.current++, type: "text", text: `${handed.name} is on the table — say what you want done with it.` },
+    ]);
+    if (handed.contentType.startsWith("image/") || handed.contentType.startsWith("video/"))
+      addPart(turn, {
+        type: "job",
+        job: { status: "done", model: "media", endpoint: handed.key.split("/")[0] || "media", url: handed.url, kind: kindOf(handed.contentType, handed.url) },
+      } as Omit<Part, "id">);
+    setText(`Using ${handed.name}, `);
+    box.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     ps.registerSuggestions("chat", [

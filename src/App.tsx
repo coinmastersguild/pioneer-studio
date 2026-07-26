@@ -43,6 +43,7 @@ import {
   type PS,
   type Suggestion,
 } from "./shared";
+import { sendCharacter } from "./characterHandoff";
 import ChatView from "./ChatView";
 import BoardView from "./BoardView";
 import StudioView from "./StudioView";
@@ -148,6 +149,15 @@ function App() {
   // handles the actual join request once a credential is present.
   useEffect(() => {
     if (new URLSearchParams(location.search).get("join")) setMode("companies");
+  }, []);
+
+  // Deep link: /?vrm=<url> opens the Head preview with that VRM loaded, via the
+  // same handoff Create uses. Ephemeral — the URL is not remembered.
+  useEffect(() => {
+    const vrm = new URLSearchParams(location.search).get("vrm");
+    if (!vrm) return;
+    sendCharacter("head", { id: `url:${vrm}`, name: "Character", vrmUrl: vrm, ephemeral: true });
+    setMode("head");
   }, []);
 
   // No-op unless this is a mobile browser without an injected provider; there

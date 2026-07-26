@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { uploadMedia, type MediaObject } from "./api";
+import { sendToChat } from "./chatHandoff";
 import { fmtBytes, GB, IcCopy, IcModels, IcMusic, kindOf, relTime, type PS } from "./shared";
 
 type Filter = "all" | "reference" | "result" | "clip" | "model" | "release";
@@ -32,8 +33,47 @@ function CopyBtn({ url, toast }: { url: string; toast: (m: string, k?: "ok" | "g
   );
 }
 
+/** Full-size look at one object. Images and video get played at size; anything
+ *  else falls back to its name and URL, which is all there is to show. */
+function Preview({ o, onClose, toast }: { o: MediaObject; onClose(): void; toast: PS["toast"] }) {
+  const kind = kindOf(o.content_type, o.url);
+  useEffect(() => {
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [onClose]);
+  return (
+    <div className="media-lightbox" onClick={onClose}>
+      <div className="ml-card" onClick={(e) => e.stopPropagation()}>
+        <div className="ml-head">
+          <b>{o.name}</b>
+          <span className="ml-meta">
+            {o.content_type} · {fmtBytes(o.bytes)}
+          </span>
+          <button type="button" className="mini-btn" onClick={onClose}>
+            ✕
+          </button>
+        </div>
+        <div className="ml-body">
+          {kind === "image" && <img src={o.url} alt={o.name} />}
+          {kind === "video" && <video src={o.url} controls autoPlay loop />}
+          {kind === "audio" && <audio src={o.url} controls autoPlay />}
+          {kind === "model" && <div className="ml-none">VRM · 3D character — open it in Create to view</div>}
+        </div>
+        <div className="ml-foot">
+          <CopyBtn url={o.url} toast={toast} />
+          <a className="mini-btn" href={o.url} target="_blank" rel="noreferrer">
+            Open original
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function MediaView({ ps }: { ps: PS }) {
   const [filter, setFilter] = useState<Filter>("all");
+  const [preview, setPreview] = useState<MediaObject | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const psRef = useRef(ps);
   psRef.current = ps;
@@ -157,7 +197,7 @@ export default function MediaView({ ps }: { ps: PS }) {
               return (
                 <tr key={o.key}>
                   <td>
-                    <div className="fcell">
+                    <div className="fcell open" role="button" tabIndex={0} onClick={() => setPreview(o)} onKeyDown={(e) => e.key === "Enter" && setPreview(o)}>
                       <div
                         className="fthumb"
                         style={
@@ -181,7 +221,22 @@ export default function MediaView({ ps }: { ps: PS }) {
                   <td className="furl">{o.url.replace(/^https?:\/\//, "")}</td>
                   <td className="fdate">{relTime(o.added)}</td>
                   <td>
-                    <CopyBtn url={o.url} toast={ps.toast} />
+                    <div className="frow-actions">
+                      <button type="button" className="mini-btn" onClick={() => setPreview(o)}>
+                        View
+                      </button>
+                      <button
+                        type="button"
+                        className="mini-btn"
+                        onClick={() => {
+                          sendToChat({ url: o.url, name: o.name, contentType: o.content_type, key: o.key });
+                          ps.setMode("chat");
+                        }}
+                      >
+                        Open in chat
+                      </button>
+                      <CopyBtn url={o.url} toast={ps.toast} />
+                    </div>
                   </td>
                 </tr>
               );
@@ -189,6 +244,7 @@ export default function MediaView({ ps }: { ps: PS }) {
           </tbody>
         </table>
       )}
+      {preview && <Preview o={preview} onClose={() => setPreview(null)} toast={ps.toast} />}
       <input
         ref={fileInput}
         type="file"

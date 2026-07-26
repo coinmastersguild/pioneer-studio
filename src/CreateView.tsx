@@ -11,6 +11,7 @@
 // to finish it. Multiple characters live side by side as a roster.
 import { useEffect, useRef, useState } from "react";
 import {
+  blobToDataUrl,
   fetchModels,
   fetchVrmStatus,
   generateVrm,
@@ -218,6 +219,26 @@ export default function CreateView({ ps }: { ps: PS }) {
     patch(active.id, { concept: a, portrait: null, talkingHead: null, vrm: null });
   }
 
+  /** An imported image is the user's chosen canonical art: it becomes concept
+   *  AND portrait at once, unlocking voice/talking-head/VRM without generating. */
+  function adoptImage(a: Art) {
+    patch(active.id, { concept: a, portrait: a, talkingHead: null, vrm: null });
+  }
+
+  async function importImageFile(f: File | undefined) {
+    if (!f || !f.type.startsWith("image/")) return;
+    try {
+      if (!ps.apiKey) throw new Error("no key");
+      const up = await uploadMedia(ps.apiKey, f);
+      adoptImage({ url: up.url, contentType: up.content_type });
+      ps.refreshMedia();
+    } catch {
+      // no key / no R2 → inline. Fine for concept/portrait; talking head and
+      // VRM still need a hosted image and say so when tried.
+      adoptImage({ url: await blobToDataUrl(f), contentType: f.type });
+    }
+  }
+
   /* ── Stage 2: portrait ── */
   async function genPortrait() {
     if (needKey() || !active.concept) return;
@@ -363,7 +384,7 @@ export default function CreateView({ ps }: { ps: PS }) {
     if (k === "voice") return !!active.voice;
     if (k === "talkinghead") return !!active.talkingHead;
     if (k === "vrm") return !!active.vrm;
-    if (k === "concept") return active.cluster.some((x) => x && x !== "failed");
+    if (k === "concept") return !!active.concept || active.cluster.some((x) => x && x !== "failed");
     return false;
   };
   const dot = (k: string) => `st-dot ${st[k] || (done(k) ? "done" : ready(k) ? "ready" : "locked")}`;
@@ -439,6 +460,24 @@ export default function CreateView({ ps }: { ps: PS }) {
           <button className="btn primary" disabled={st.concept === "running"} onClick={genConcepts}>
             {st.concept === "running" ? "Generating…" : `Generate ${CONCEPT_COUNT} concepts`}
           </button>
+          <label className="btn">
+            Import image
+            <input
+              type="file"
+              accept="image/*"
+              hidden
+              onChange={(e) => {
+                void importImageFile(e.target.files?.[0]);
+                e.target.value = "";
+              }}
+            />
+          </label>
+          <VrmPicker
+            ps={ps}
+            kind="image"
+            label="From Media…"
+            onPick={(object) => adoptImage({ url: object.url, contentType: object.content_type })}
+          />
           {err.concept && <span className="sc-err">{err.concept}</span>}
         </div>
         {active.cluster.length > 0 && (

@@ -103,7 +103,9 @@ export default function BoardView({ ps }: { ps: PS }) {
     // a described beat renders immediately — with its cast + location driving
     // images as refs when they exist (consistency), else a fast placeholder
     const fresh = sb.shots.find((s) => s.id === shotId);
-    if (fresh && editText.trim() && (fresh.status === "empty" || fresh.status === "failed"))
+    // never over a still that is already there — an image the user attached must
+    // not be replaced by a generated one just because the text changed
+    if (fresh && editText.trim() && !fresh.result && (fresh.status === "empty" || fresh.status === "failed"))
       void renderShot(p, fresh, { refs: beatRefs(pipeRef.current, extOf(pipeRef.current, shotId)) }).catch((e: any) =>
         p.toast(String(e.message || e)),
       );

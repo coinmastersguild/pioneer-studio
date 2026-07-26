@@ -39,10 +39,26 @@ export async function trackShotJob(ps: PS, shotId: string, jobId: string): Promi
 export async function renderShot(
   ps: PS,
   shot: Shot,
-  opts?: { refs?: string[]; model?: string; endpoint?: string },
+  opts?: { refs?: string[]; model?: string; endpoint?: string; editFrom?: string },
 ): Promise<void> {
   if (!ps.apiKey) {
     ps.toast("Paste your sk-pioneer key first");
+    return;
+  }
+  // Editing the still that is already there beats generating a replacement for
+  // it: a beat whose image the user chose must keep that image as the subject.
+  if (opts?.editFrom) {
+    const editModel = pickModel(ps.models, "image_edit");
+    if (!editModel) {
+      ps.toast("No image-edit model on this account — nothing to edit with");
+      return;
+    }
+    ps.setBoard(await patchShot(ps.apiKey, undefined, shot.id, { model: editModel.model, endpoint: editModel.endpoint }));
+    const edited = await generateShot(ps.apiKey, shot.id, { image: opts.editFrom });
+    ps.setBoard(edited);
+    ps.charge(null);
+    const running = edited.shots.find((s) => s.id === shot.id);
+    if (running?.jobId) void trackShotJob(ps, shot.id, running.jobId);
     return;
   }
   const { model, endpoint } = opts || {};

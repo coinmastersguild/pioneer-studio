@@ -85,10 +85,15 @@ export default function BeatDialog({
     return sb.shots.find((s) => s.id === shot.id) || null;
   }
 
+  // A beat that already has a still gets *edited* from it — the picture the user
+  // put there is the subject, and the text is the instruction. Only an empty
+  // beat generates from nothing.
   const saveAndRender = () =>
     run("text", async () => {
       const fresh = await saveText();
-      if (fresh && text.trim()) await renderShot(ps, fresh, { refs: beatRefs(pipe, ext) });
+      if (!fresh || !text.trim()) return;
+      if (fresh.result) await renderShot(ps, fresh, { editFrom: fresh.result.url });
+      else await renderShot(ps, fresh, { refs: beatRefs(pipe, ext) });
     });
 
   const defaultFinal = () => buildFinalPrompt(shot.prompt, ext, pipe.characters);
@@ -120,7 +125,9 @@ export default function BeatDialog({
       if (!ps.apiKey) return ps.toast("Paste your sk-pioneer key first");
       if (!file.type.startsWith("image/")) return ps.toast("Beats take an image here");
       const up = await uploadMedia(ps.apiKey, file);
+      ps.charge(up.credits_remaining ?? null);
       ps.refreshMedia();
+      ps.toast(`${file.name} → saved to Media`, "ok");
       await attachImage(up.url, up.key, up.content_type, file.size);
     });
 
@@ -171,7 +178,7 @@ export default function BeatDialog({
             />
             <div className="bd-actions">
               <button type="button" className="beat-btn accent" disabled={rendering || busy === "text" || !text.trim()} onClick={saveAndRender}>
-                {rendering ? `${shot.status}…` : shot.result ? "Save & re-render" : "Save & render placeholder"}
+                {rendering ? `${shot.status}…` : shot.result ? "Save & edit this image" : "Save & render placeholder"}
               </button>
               {phase === 1 && (
                 <>
