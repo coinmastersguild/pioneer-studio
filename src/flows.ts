@@ -104,6 +104,8 @@ export const FLOWS: Flow[] = [
     ],
     build: (v) => ({
       prompt: v.prompt,
+      // argues against the dissolve the reference sheet bleeds into frame one
+      negative_prompt: "double exposure, ghosting, transparent overlay, superimposed still image, cross-fade, watermark, text, low resolution, blurry",
       control_video: v.control,
       ...(v.sheet ? { reference_sheet: v.sheet } : {}),
       ...dims(v.size || "1536x896"),

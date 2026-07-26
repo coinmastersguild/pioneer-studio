@@ -123,6 +123,8 @@ test("a control flow is gated on its required slots and builds the job it promis
   const params = flow.build({ control: "https://r2/take.webm", prompt: "golden hour", size: "1536x896", frames: "241", guide: "0.85" });
   expect(params).toEqual({
     prompt: "golden hour",
+    negative_prompt:
+      "double exposure, ghosting, transparent overlay, superimposed still image, cross-fade, watermark, text, low resolution, blurry",
     control_video: "https://r2/take.webm",
     width: 1536,
     height: 896,

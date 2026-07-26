@@ -280,6 +280,12 @@ export async function genMusic(ps: PS, prompt: string): Promise<Artifact> {
   return runJob(ps, m, { prompt });
 }
 
+/** The reference sheet bleeds into the opening frames as a semi-transparent
+ *  dissolve rather than conditioning identity, so every enhance job argues
+ *  against that by default. Callers can override. */
+export const ENHANCE_NEGATIVE =
+  "double exposure, ghosting, transparent overlay, superimposed still image, cross-fade, watermark, text, low resolution, blurry";
+
 /** Finish an authored ARDY skeleton take through LTX pose control. This is a
  * distinct capability from ordinary text/keyframe video: the control video is
  * the motion contract, while the optional reference sheet supplies identity. */
@@ -287,7 +293,7 @@ export async function enhanceMotionVideo(
   ps: PS,
   prompt: string,
   controlVideo: string,
-  opts?: { referenceSheet?: string; fullLength?: boolean; guideStrength?: number; seed?: number; onPoll?: JobWatcher },
+  opts?: { referenceSheet?: string; fullLength?: boolean; guideStrength?: number; seed?: number; negativePrompt?: string; onPoll?: JobWatcher },
 ): Promise<Artifact> {
   const m = pickModel(ps.models, "motion_video");
   if (!m) throw new Error("pose-controlled LTX is not available right now");
@@ -296,6 +302,7 @@ export async function enhanceMotionVideo(
     m,
     {
       prompt,
+      negative_prompt: opts?.negativePrompt ?? ENHANCE_NEGATIVE,
       control_video: controlVideo,
       ...(opts?.referenceSheet ? { reference_sheet: opts.referenceSheet } : {}),
       width: 768,
