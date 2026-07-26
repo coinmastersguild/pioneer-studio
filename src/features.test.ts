@@ -278,3 +278,22 @@ test("describeCameraMove: words match the numbers", () => {
   expect(describeCameraMove({ panX: 0.1, panY: 0, zoom: 1, rollDeg: 0, confidence: 1, seconds: 4 })).toContain("slight pan left");
   expect(describeCameraMove({ panX: 0, panY: 0, zoom: 1, rollDeg: 0, confidence: 1, seconds: 4 })).toContain("static camera");
 });
+
+test("the copilot's board brief reports real beat state, not the media list", async () => {
+  const { boardBrief } = await import("./copilot");
+  const p = basePipe();
+  p.beats = { s1: { ...emptyExt(), characterIds: ["c1"], locationId: "l1" } };
+  const board = {
+    id: "b1",
+    title: "Night Market",
+    shots: [shot("s1"), { ...shot("s2"), prompt: "", status: "empty", result: null }],
+  } as unknown as import("./api").Storyboard;
+  const brief = boardBrief(board, p);
+  expect(brief).toContain("Night Market");
+  expect(brief).toContain("2 beats");
+  expect(brief).toContain("still ✓"); // beat 1 has a result
+  expect(brief).toContain("no still"); // beat 2 does not
+  expect(brief).toContain("(no text)");
+  expect(brief).toContain("Cat"); // the cast is named
+  expect(boardBrief(null, null)).toContain("empty");
+});

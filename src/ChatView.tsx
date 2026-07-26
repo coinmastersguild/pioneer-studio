@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { submitJob, uploadMedia, type MediaObject } from "./api";
-import { injectRefs, requestJobPlan } from "./copilot";
+import { boardBrief, injectRefs, requestJobPlan } from "./copilot";
+import { loadPipeline } from "./pipeline";
 import { consumeChatMedia } from "./chatHandoff";
 import FlowCard from "./FlowCard";
 import SkeletonCard from "./SkeletonCard";
@@ -188,7 +189,10 @@ export default function ChatView({ ps }: { ps: PS }) {
     let runTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       const mediaObjects = p.media?.objects || [];
-      const plan = await requestJobPlan(p.apiKey, p.models, mediaObjects, t);
+      // the board as it actually stands — otherwise "how is the storyboard doing?"
+      // gets answered from the media list, which is a different question
+      const brief = boardBrief(p.board, p.board ? loadPipeline(p.board.id) : null);
+      const plan = await requestJobPlan(p.apiKey, p.models, mediaObjects, t, brief);
       if (plan.say) await streamText(aiTurn, plan.say);
       if (!plan.job) return;
 

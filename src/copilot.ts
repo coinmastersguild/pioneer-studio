@@ -2,7 +2,41 @@
 // The LLM never sees raw URLs; it picks refs by media key and the client
 // injects the public R2 URLs into params by content type.
 
-import { chatCompletion, type JobModel, type MediaObject } from "./api";
+import { chatCompletion, type JobModel, type MediaObject, type Storyboard } from "./api";
+import { extOf, type Pipeline } from "./pipeline";
+import { boardReadiness } from "./readiness";
+
+/** The board as the copilot needs to see it: what exists, what is missing, and
+ *  where the work actually stands. Without this it answers questions about the
+ *  storyboard by describing the media list, which is not the same thing. */
+export function boardBrief(board: Storyboard | null, pipe: Pipeline | null): string {
+  if (!board || !board.shots?.length) return "Storyboard: empty — no beats yet.";
+  const shots = board.shots;
+  const lines: string[] = [];
+  if (pipe) {
+    const { score, band } = boardReadiness(shots, pipe);
+    lines.push(
+      `Storyboard "${board.title || "untitled"}": ${shots.length} beats × 10s = ${shots.length * 10}s, phase ${pipe.phase}, readiness ${score}% (${band}).`,
+    );
+    const cast = pipe.characters.map((c) => `${c.name}${c.approved ? "" : " (unapproved)"}${c.image ? "" : " (no image)"}`);
+    lines.push(`Cast: ${cast.length ? cast.join(", ") : "none"}. Locations: ${pipe.locations.map((l) => l.name).join(", ") || "none"}.`);
+    lines.push(`Music: ${pipe.music ? "rendered" : pipe.musicPrompt ? `prompt only — "${pipe.musicPrompt}"` : "none"}.`);
+  } else {
+    lines.push(`Storyboard "${board.title || "untitled"}": ${shots.length} beats.`);
+  }
+  lines.push("Beats:");
+  for (const [i, s] of shots.entries()) {
+    const ext = pipe ? extOf(pipe, s.id) : null;
+    const bits = [
+      s.status === "ready" && s.result ? "still ✓" : s.status === "empty" ? "no still" : s.status,
+      ext?.finalClip ? "final clip ✓" : null,
+      ext?.tracers.length ? `${ext.tracers.length} tracers` : null,
+      ext?.characterIds.length ? `cast ${ext.characterIds.length}` : null,
+    ].filter(Boolean);
+    lines.push(`  ${i + 1}. ${s.prompt ? `"${s.prompt.slice(0, 70)}"` : "(no text)"} — ${bits.join(", ")}`);
+  }
+  return lines.join("\n");
+}
 
 export type JobPlan = {
   say: string;
@@ -14,7 +48,7 @@ export type JobPlan = {
   };
 };
 
-function systemPrompt(models: JobModel[], media: MediaObject[]): string {
+function systemPrompt(models: JobModel[], media: MediaObject[], brief: string): string {
   const modelLines = models
     .map((m) => `- ${m.model} · ${m.endpoint} (${m.credits} cr) — ${m.note || ""}`)
     .join("\n");
@@ -23,8 +57,15 @@ function systemPrompt(models: JobModel[], media: MediaObject[]): string {
     : "(none)";
   return `You are the Pioneer Studio copilot. The user describes what they want in plain language; you pick the model, endpoint, and parameters, and wire up their references.
 Respond with ONLY a JSON object, no prose, no code fences:
-{"say":"<one short sentence explaining your pick — terse, technical>","job":{"model":"<model>","endpoint":"<endpoint>","params":{...},"refs":["<media key>", ...]}}
+{"say":"<one or two sentences — terse, technical, specific>","job":{"model":"<model>","endpoint":"<endpoint>","params":{...},"refs":["<media key>", ...]}}
 If the request needs no generation job, omit "job" and answer in "say".
+
+When asked about the state of the project — status, what is left, what is missing, is it ready —
+answer from the STORYBOARD STATE below, naming actual beats and what each one lacks. Never
+answer a question about the storyboard by describing the media library; they are different things.
+
+STORYBOARD STATE
+${brief}
 
 Available models/endpoints:
 ${modelLines}
@@ -65,9 +106,10 @@ export async function requestJobPlan(
   models: JobModel[],
   media: MediaObject[],
   userText: string,
+  brief = "Storyboard: not loaded.",
 ): Promise<JobPlan> {
   const content = await chatCompletion(apiKey, [
-    { role: "system", content: systemPrompt(models, media) },
+    { role: "system", content: systemPrompt(models, media, brief) },
     { role: "user", content: userText },
   ]);
   return parsePlan(content);
