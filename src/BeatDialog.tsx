@@ -45,6 +45,7 @@ export default function BeatDialog({
   const [text, setText] = useState(shot.prompt);
   const [busy, setBusy] = useState<string | null>(null); // which row is working
   const [dragOver, setDragOver] = useState(false);
+  const [picking, setPicking] = useState(false);
   const picker = useRef<HTMLInputElement>(null);
   const ext = extOf(pipe, shot.id);
   const [finalPrompt, setFinalPrompt] = useState(ext.finalPrompt);
@@ -248,22 +249,9 @@ export default function BeatDialog({
                 Upload image
               </button>
               {!!mediaImages.length && (
-                <select
-                  className="bd-pick"
-                  value=""
-                  disabled={!!busy}
-                  onChange={(e) => {
-                    const hit = mediaImages.find((o) => o.url === e.target.value);
-                    if (hit) void run("image", () => attachImage(hit.url, hit.key, hit.content_type, hit.bytes));
-                  }}
-                >
-                  <option value="">Use from media…</option>
-                  {mediaImages.map((o) => (
-                    <option key={o.key} value={o.url}>
-                      {o.name}
-                    </option>
-                  ))}
-                </select>
+                <button type="button" className="beat-btn" disabled={!!busy} onClick={() => setPicking((v) => !v)}>
+                  {picking ? "Hide media" : `Use from media (${mediaImages.length})`}
+                </button>
               )}
               {shot.result && (
                 <button
@@ -276,6 +264,28 @@ export default function BeatDialog({
                 </button>
               )}
             </div>
+            {picking && (
+              // thumbnails, not a dropdown of filenames — you cannot pick a
+              // still by its content-addressed name
+              <div className="bd-mediagrid">
+                {mediaImages.map((o) => (
+                  <button
+                    key={o.key}
+                    type="button"
+                    className={`bd-mthumb${shot.result?.url === o.url ? " on" : ""}`}
+                    title={o.name}
+                    disabled={!!busy}
+                    style={{ backgroundImage: `url(${o.url})` }}
+                    onClick={() => {
+                      setPicking(false);
+                      void run("image", () => attachImage(o.url, o.key, o.content_type, o.bytes));
+                    }}
+                  >
+                    <span>{o.name}</span>
+                  </button>
+                ))}
+              </div>
+            )}
             <input
               ref={picker}
               type="file"
