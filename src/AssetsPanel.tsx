@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { Shot } from "./api";
+import { captionImage, type Shot } from "./api";
 import { kindOf, type PS } from "./shared";
 import {
   BEAT_SECONDS,
@@ -91,6 +91,21 @@ export default function AssetsPanel({
       });
       reset();
       ps.toast(added ? `${added} ${kind === "character" ? "characters" : "locations"} proposed` : "0 new (all duplicates)", "gold");
+    });
+
+  /** The exercise is verbalising the place: a plate is one frame, but the words
+   *  are what every later render is conditioned on. Reading the description back
+   *  out of the image is also how you notice the image is of the wrong place. */
+  const verbalize = (l: { id: string; name: string; image: { url: string } | null }) =>
+    run("verbalize" + l.id, async () => {
+      if (!l.image) throw new Error("give this location an image first");
+      const said = await captionImage(
+        ps.apiKey,
+        l.image.url,
+        `Describe this place as a location entry for film continuity: architecture and materials, scale, terrain, time of day, weather, and the light. Two or three sentences. Describe only the place — ignore any people, creatures or vehicles in frame. No preamble.`,
+      );
+      mut((p) => void (p.locations.find((x) => x.id === l.id)!.description = said));
+      ps.toast(`${l.name} described from its plate`, "gold");
     });
 
   /** One press instead of three screens: propose the locations the beats imply,
@@ -314,6 +329,15 @@ export default function AssetsPanel({
                     }
                   >
                     {busy === "loc" + l.id ? "…" : l.image ? "⟳" : "Generate"}
+                  </button>
+                  <button
+                    type="button"
+                    className="beat-btn"
+                    disabled={busy != null || !l.image}
+                    title={l.image ? "Write the description from this plate" : "needs an image first"}
+                    onClick={() => verbalize(l)}
+                  >
+                    {busy === "verbalize" + l.id ? "reading…" : "Verbalize"}
                   </button>
                   <button
                     type="button"

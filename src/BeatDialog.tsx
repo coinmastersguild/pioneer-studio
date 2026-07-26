@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { captionImage, patchShot, uploadMedia, type MediaObject, type Shot } from "./api";
+import { critiqueResult } from "./copilot";
 import { isShotRunning, renderShot } from "./shots";
 import { fmtTime, kindOf, PH, type PS } from "./shared";
 import {
@@ -46,6 +47,7 @@ export default function BeatDialog({
   const [busy, setBusy] = useState<string | null>(null); // which row is working
   const [dragOver, setDragOver] = useState(false);
   const [picking, setPicking] = useState(false);
+  const [mismatch, setMismatch] = useState<{ ok: boolean; notes: string; fix: string } | null>(null);
   const picker = useRef<HTMLInputElement>(null);
   const ext = extOf(pipe, shot.id);
   const [finalPrompt, setFinalPrompt] = useState(ext.finalPrompt);
@@ -120,6 +122,30 @@ export default function BeatDialog({
     mut((p) => markBeatEdited(p, shot.id));
     ps.toast("Described from the image", "gold");
   }
+
+  /** Does the still actually show the place this beat is set in? A battle written
+   *  for a village that renders a castle is only visible once the location has
+   *  been put into words — and the repair is an edit of that still, not a new one. */
+  const checkLocation = () =>
+    run("match", async () => {
+      const loc = pipe.locations.find((l) => l.id === ext.locationId);
+      if (!loc?.description.trim()) throw new Error("this beat's location has no description yet — Verbalize it first");
+      if (!shot.result) throw new Error("no still on this beat to check");
+      const verdict = await critiqueResult(
+        ps.apiKey,
+        `the scene takes place at ${loc.name}: ${loc.description}`,
+        shot.result.url,
+      );
+      setMismatch(verdict);
+      if (verdict.ok) ps.toast(`Still matches ${loc.name}`, "ok");
+    });
+
+  const applyLocationFix = () =>
+    run("match", async () => {
+      if (!mismatch?.fix || !shot.result) return;
+      await renderShot(ps, shot, { editFrom: shot.result.url, editPrompt: mismatch.fix });
+      setMismatch(null);
+    });
 
   const attachFile = (file: File) =>
     run("image", async () => {
@@ -372,6 +398,26 @@ export default function BeatDialog({
                   <div className="bd-desc">no locations yet — add them in the Locations library at the top of the board</div>
                 )}
                 {scene && <div className="bd-img" style={img(scene)} />}
+                {ext.locationId && shot.result && (
+                  <div className="bd-actions">
+                    <button type="button" className="beat-btn" disabled={!!busy} onClick={checkLocation}>
+                      {busy === "match" ? "comparing…" : "Does the still match this location?"}
+                    </button>
+                  </div>
+                )}
+                {mismatch && (
+                  <div className={`bd-desc${mismatch.ok ? "" : " warn"}`}>
+                    {mismatch.ok ? "Matches — " : "Mismatch — "}
+                    {mismatch.notes}
+                    {!mismatch.ok && mismatch.fix && (
+                      <div className="bd-actions" style={{ marginTop: 6 }}>
+                        <button type="button" className="beat-btn accent" disabled={!!busy} onClick={applyLocationFix}>
+                          Edit the still to match
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 

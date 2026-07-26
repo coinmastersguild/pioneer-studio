@@ -39,7 +39,7 @@ export async function trackShotJob(ps: PS, shotId: string, jobId: string): Promi
 export async function renderShot(
   ps: PS,
   shot: Shot,
-  opts?: { refs?: string[]; model?: string; endpoint?: string; editFrom?: string },
+  opts?: { refs?: string[]; model?: string; endpoint?: string; editFrom?: string; editPrompt?: string },
 ): Promise<void> {
   if (!ps.apiKey) {
     ps.toast("Paste your sk-pioneer key first");
@@ -54,7 +54,12 @@ export async function renderShot(
       return;
     }
     ps.setBoard(await patchShot(ps.apiKey, undefined, shot.id, { model: editModel.model, endpoint: editModel.endpoint }));
-    const edited = await generateShot(ps.apiKey, shot.id, { image: opts.editFrom });
+    // params override the shot's own prompt server-side, so a repair
+    // instruction can drive the edit without rewriting the beat text
+    const edited = await generateShot(ps.apiKey, shot.id, {
+      image: opts.editFrom,
+      ...(opts.editPrompt?.trim() ? { prompt: opts.editPrompt.trim() } : {}),
+    });
     ps.setBoard(edited);
     ps.charge(null);
     const running = edited.shots.find((s) => s.id === shot.id);
