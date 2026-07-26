@@ -416,7 +416,9 @@ export default function ChatView({ ps }: { ps: PS }) {
                   if (part.type === "ask") {
                     const answer = (a: string) => {
                       patchPart(turn.id, part.id, { answered: a } as Partial<Part>);
-                      void fire(a);
+                      // mark it as the answer to the question just asked, so the
+                      // planner acts on it instead of re-opening the interview
+                      void fire(`${a} — that answers your question, go ahead.`);
                     };
                     return (
                       <div key={part.id} className="ask-card">

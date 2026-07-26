@@ -482,13 +482,19 @@ function App() {
           </button>
           <p className="gate-note">Signs a challenge in your wallet — no password, nothing uploaded.</p>
           <div className="gate-or">or paste a key</div>
-          <input
-            type="password"
-            className="gate-key"
-            placeholder="sk-pioneer-…"
-            autoComplete="off"
-            onChange={(e) => setApiKey(e.target.value.trim())}
-          />
+          {/* a lone password field outside a form makes browsers warn and
+              password managers behave oddly — submitting is a no-op, the key
+              is read on change */}
+          <form onSubmit={(e) => e.preventDefault()}>
+            <input
+              type="password"
+              className="gate-key"
+              name="pioneer-key"
+              placeholder="sk-pioneer-…"
+              autoComplete="off"
+              onChange={(e) => setApiKey(e.target.value.trim())}
+            />
+          </form>
           <p className="gate-note">
             No key? Mint one at <b>alpha.pioneers.dev/keys</b>.
           </p>

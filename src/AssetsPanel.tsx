@@ -42,6 +42,13 @@ export default function AssetsPanel({
   const placedBeats = shots.filter((s) => sceneArtOf(pipe, extOf(pipe, s.id))).length;
   const tracersDone = shots.filter((s) => extOf(pipe, s.id).tracers.length).length;
   const finalsDone = shots.filter((s) => extOf(pipe, s.id).finalClip).length;
+  // what "Render all" would actually produce: a beat needs some scene reference,
+  // and its own still counts. Counting it here means the button can say so
+  // before it is pressed rather than skipping in silence.
+  const renderable = shots.filter((s) => {
+    const x = extOf(pipe, s.id);
+    return !x.finalClip && (sceneArtOf(pipe, x) || s.result);
+  }).length;
   const allSpeech = shots.flatMap((s) =>
     extOf(pipe, s.id)
       .tracers.filter((t) => t.kind === "speech")
@@ -84,6 +91,53 @@ export default function AssetsPanel({
       });
       reset();
       ps.toast(added ? `${added} ${kind === "character" ? "characters" : "locations"} proposed` : "0 new (all duplicates)", "gold");
+    });
+
+  /** One press instead of three screens: propose the locations the beats imply,
+   *  render a plate for each, and assign every beat the one its text matches.
+   *  Existing locations, plates and assignments are left alone. */
+  const draftLocations = () =>
+    run("locations", async () => {
+      // mut lands on the parent's state, so this cannot read `pipe` back
+      // mid-run — it tracks the roster it is building itself.
+      let roster = [...pipe.locations];
+      if (!roster.length) {
+        setBusy("locations — proposing");
+        const found = await proposeRoster(ps.apiKey, "location", beats);
+        const fresh = found
+          .filter((f, i) => found.findIndex((g) => g.name.toLowerCase() === f.name.toLowerCase()) === i)
+          .map((f) => ({ id: newId(), name: f.name, description: f.description, prompt: "", image: null }));
+        if (!fresh.length) throw new Error("no locations came back — describe them yourself and try again");
+        mut((p) => {
+          for (const l of fresh) if (!p.locations.some((x) => x.id === l.id)) p.locations.push({ ...l });
+        });
+        roster = fresh;
+      }
+
+      for (const [i, l] of roster.entries()) {
+        if (l.image) continue;
+        setBusy(`locations — plate ${i + 1}/${roster.length}`);
+        const art = await genImage(ps, locationPrompt(l));
+        mut((p) => {
+          const hit = p.locations.find((x) => x.id === l.id);
+          if (hit) hit.image = art;
+        });
+      }
+
+      // assign by name mention, else everything unassigned lands on the first
+      // plate — a wrong location beats no location, and a beat can be re-pointed
+      setBusy("locations — assigning");
+      mut((p) => {
+        for (const s of shots) {
+          const x = extOf(p, s.id);
+          if (x.locationId) continue;
+          const text = s.prompt.toLowerCase();
+          const hit = roster.find((l) => l.name && text.includes(l.name.toLowerCase()));
+          x.locationId = (hit || roster[0]).id;
+          p.beats[s.id] = x;
+        }
+      });
+      ps.toast(`${roster.length} location${roster.length === 1 ? "" : "s"} ready and assigned to every beat`, "gold");
     });
 
   return (
@@ -206,6 +260,15 @@ export default function AssetsPanel({
           </button>
           <button
             type="button"
+            className="beat-btn gold-btn"
+            disabled={busy != null || !shots.length}
+            title="Propose locations from the beats, render a plate for each, and assign every beat one"
+            onClick={draftLocations}
+          >
+            {busy?.startsWith("locations") ? busy.replace("locations — ", "") + "…" : "AI draft locations"}
+          </button>
+          <button
+            type="button"
             className="beat-btn"
             onClick={() => mut((p) => p.locations.push({ id: newId(), name: "New location", description: "", prompt: "", image: null }))}
           >
@@ -272,7 +335,7 @@ export default function AssetsPanel({
           <div className="ap-head">
             <b>Tracers</b>
             <span className="bd-desc">
-              {tracersDone}/{shots.length} beats blocked · {placedBeats}/{shots.length} beats have a location · open a beat to fine-tune
+              {tracersDone}/{shots.length} beats have motion staged · {placedBeats}/{shots.length} have a location · open a beat to fine-tune
             </span>
             <div className="grow" />
             <button
@@ -398,7 +461,11 @@ export default function AssetsPanel({
         <div className="ap-head">
           <b>Phase 3 — Final renders</b>
           <span className="bd-desc">
-            {finalsDone}/{shots.length} clips{videoModel ? " · slow & expensive, per beat" : " · no video model available right now"}
+            {finalsDone}/{shots.length} clips{videoModel ? "" : " · no video model available right now"}
+            {videoModel && renderable > 0 ? ` · ${renderable} ready to render` : ""}
+            {videoModel && shots.length - finalsDone - renderable > 0
+              ? ` · ${shots.length - finalsDone - renderable} need a location or a still first`
+              : ""}
           </span>
           <div className="grow" />
           <button
@@ -410,7 +477,9 @@ export default function AssetsPanel({
                 let skipped = 0;
                 for (const [i, s] of shots.entries()) {
                   const x = extOf(pipe, s.id);
-                  const scene = sceneArtOf(pipe, x);
+                  // A beat with no location still has its own approved still —
+                  // that is a better scene reference than refusing to render.
+                  const scene = sceneArtOf(pipe, x) || (s.result ? { url: s.result.url, content_type: s.result.content_type } : null);
                   if (x.finalClip) continue;
                   if (!scene) {
                     skipped++;
@@ -435,7 +504,7 @@ export default function AssetsPanel({
                     p.beats[s.id] = y;
                   });
                 }
-                if (skipped) ps.toast(`${skipped} beat${skipped === 1 ? "" : "s"} skipped — assign locations first`);
+                if (skipped) ps.toast(`${skipped} beat${skipped === 1 ? "" : "s"} skipped — they have neither a location nor a still`);
               })
             }
           >
