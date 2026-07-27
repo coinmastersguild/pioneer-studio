@@ -1,9 +1,9 @@
-// Prompt-pack export — serialize the whole board (beats, cast, locations,
-// tracers, sound plan) to portable markdown + JSON so the storyboard is useful
-// in any tool before finals render.
+// Prompt-pack export — serialize the whole board (beats, cast, tracers, sound
+// plan) to portable markdown + JSON so the storyboard is useful in any tool
+// before finals render.
 // Pure string/object building — no DOM except the download helper.
 import type { Shot, Storyboard } from "./api";
-import { buildFinalPrompt, extOf, locationOf, motionSummary, refIntentOf, type Pipeline } from "./pipeline";
+import { buildFinalPrompt, extOf, motionSummary, refIntentOf, type Pipeline } from "./pipeline";
 import { fmtTime } from "./shared";
 
 const tc = (shots: Shot[], i: number) => {
@@ -18,9 +18,7 @@ export function shotBible(sb: Storyboard, pipe: Pipeline) {
     title: sb.title,
     createdAt: new Date().toISOString(),
     runtimeSeconds: sb.shots.reduce((s, b) => s + (b.sourceDuration ?? 10), 0),
-    phase: pipe.phase,
     characters: pipe.characters.map((c) => ({ name: c.name, description: c.description, prompt: c.prompt, hasImage: !!c.image })),
-    locations: pipe.locations.map((l) => ({ name: l.name, description: l.description, hasImage: !!l.image })),
     music: pipe.musicPrompt || null,
     beats: sb.shots.map((s, i) => {
       const ext = extOf(pipe, s.id);
@@ -28,7 +26,6 @@ export function shotBible(sb: Storyboard, pipe: Pipeline) {
         index: i + 1,
         timecode: tc(sb.shots, i),
         text: s.prompt,
-        location: locationOf(pipe, ext)?.name || null,
         cast: ext.characterIds.map((id) => pipe.characters.find((c) => c.id === id)?.name).filter(Boolean),
         refIntent: refIntentOf(ext).id,
         motion: motionSummary(ext.tracers, (id) => pipe.characters.find((c) => c.id === id)?.name || (id ? "subject" : "camera")) || null,
@@ -53,17 +50,11 @@ export function promptPackMarkdown(sb: Storyboard, pipe: Pipeline): string {
     for (const c of bible.characters) L.push(`- **${c.name}** — ${c.description}${c.prompt ? ` _(style: ${c.prompt})_` : ""}`);
     L.push("");
   }
-  if (bible.locations.length) {
-    L.push("## Locations", "");
-    for (const l of bible.locations) L.push(`- **${l.name}** — ${l.description}`);
-    L.push("");
-  }
   if (bible.music) L.push("## Music", "", bible.music, "");
   L.push("## Beats", "");
   for (const b of bible.beats) {
     L.push(`### Beat ${String(b.index).padStart(2, "0")} · ${b.timecode}`, "");
     L.push(b.text || "_(no description yet)_", "");
-    if (b.location) L.push(`- Location: ${b.location}`);
     if (b.cast.length) L.push(`- Cast: ${b.cast.join(", ")}`);
     L.push(`- Reference intent: ${b.refIntent}`);
     if (b.motion) L.push(`- Motion: ${b.motion}`);

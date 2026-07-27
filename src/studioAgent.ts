@@ -34,12 +34,10 @@ function digest(mode: Mode, board: Storyboard | null, media: MediaList | null): 
   const beats = (board?.shots || [])
     .map((shot, index) => `${index + 1}. id=${shot.id} status=${shot.status} text=${JSON.stringify(shot.prompt || "")}`)
     .join("\n");
-  let production = "Phase: 1\nCast: (none)\nLocations: (none)";
+  let production = "Cast: (none)";
   if (board && typeof localStorage !== "undefined") {
     const pipe = loadPipeline(board.id);
-    production = `Phase: ${pipe.phase}
-Cast: ${pipe.characters.map((character) => `${character.id}=${character.name}`).join(", ") || "(none)"}
-Locations: ${pipe.locations.map((location) => `${location.id}=${location.name}`).join(", ") || "(none)"}`;
+    production = `Cast: ${pipe.characters.map((character) => `${character.id}=${character.name}`).join(", ") || "(none)"}`;
   }
   const mediaLines = (media?.objects || [])
     .slice(0, 30)

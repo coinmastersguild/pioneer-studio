@@ -13,15 +13,14 @@ export type BeatReadiness = {
   components: { key: string; label: string; value: number; weight: number; hint: string }[];
 };
 
-// weights sum to 100 — still & location dominate because the final render
-// literally consumes them as reference images.
+// weights sum to 100 — the still dominates because the final render consumes it
+// as the reference image it animates. Everything else is optional polish.
 const WEIGHTS = {
-  still: 25,
-  location: 20,
+  still: 40,
   cast: 20,
   tracers: 15,
   voice: 10,
-  prompt: 10,
+  prompt: 15,
 } as const;
 
 export const READY_AT = 80;
@@ -33,9 +32,6 @@ export function beatReadiness(shot: Shot, pipe: Pipeline): BeatReadiness {
   const ext = extOf(pipe, shot.id);
 
   const still = shot.status === "ready" && shot.result ? 1 : 0;
-
-  const loc = pipe.locations.find((l) => l.id === ext.locationId);
-  const location = loc?.image || ext.scene ? 1 : loc ? 0.4 : 0;
 
   // no cast assigned may be intentional (empty landscape beat) → half credit
   const castChars = ext.characterIds.map((id) => pipe.characters.find((c) => c.id === id)).filter(Boolean);
@@ -50,7 +46,6 @@ export function beatReadiness(shot: Shot, pipe: Pipeline): BeatReadiness {
 
   const components = [
     { key: "still", label: "Still", value: still, weight: WEIGHTS.still, hint: still ? "placeholder rendered" : "render the beat's still" },
-    { key: "location", label: "Location", value: location, weight: WEIGHTS.location, hint: location === 1 ? "location art ready" : location ? "location set — generate its image" : "assign a location" },
     { key: "cast", label: "Cast", value: cast, weight: WEIGHTS.cast, hint: cast === 1 ? "driving images ready" : cast === 0.5 ? "no cast assigned (ok if intentional)" : "generate driving images for the cast" },
     { key: "tracers", label: "Tracers", value: tracers, weight: WEIGHTS.tracers, hint: tracers ? "motion drawn" : "draw motion tracers" },
     { key: "voice", label: "Voice", value: voice, weight: WEIGHTS.voice, hint: voice === 1 ? "voice lines covered" : "generate voices for speech tracers" },

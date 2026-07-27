@@ -188,9 +188,7 @@ const shot = (id: string, over: Partial<Shot> = {}): Shot =>
   ({ id, prompt: "a cat crosses the street", status: "ready", result: { url: "s.png", key: "", content_type: "image/png", bytes: 1 }, sourceDuration: 10, ...over }) as unknown as Shot;
 
 const basePipe = (): Pipeline => ({
-  phase: 2,
   characters: [{ id: "c1", name: "Cat", description: "orange tabby", approved: true, prompt: "", image: { url: "cat.png", content_type: "image/png" } }],
-  locations: [{ id: "l1", name: "Street", description: "rainy street", prompt: "", image: { url: "street.png", content_type: "image/png" } }],
   beats: {},
   musicPrompt: "lofi",
   music: null,
@@ -202,7 +200,6 @@ test("readiness: complete beat is ready, empty beat is blocked", () => {
   pipe.beats["a"] = {
     ...emptyExt(),
     characterIds: ["c1"],
-    locationId: "l1",
     tracers: [{ id: "t1", characterId: "c1", kind: "move", path: [{ t: 0, x: 0.1, y: 0.5 }, { t: 8, x: 0.9, y: 0.5 }] }],
   };
   const full = beatReadiness(shot("a"), pipe);
@@ -226,7 +223,6 @@ test("readiness: speech tracer without voice docks the voice component", () => {
   pipe.beats["a"] = {
     ...emptyExt(),
     characterIds: ["c1"],
-    locationId: "l1",
     tracers: [{ id: "t1", characterId: "c1", kind: "speech", text: "meow", path: [{ t: 2.5, x: 0.5, y: 0.5 }] }],
   };
   const r = beatReadiness(shot("a"), pipe);
@@ -261,7 +257,6 @@ test("prompt pack: markdown + bible carry beats, cast, speech", () => {
   pipe.beats["a"] = {
     ...emptyExt(),
     characterIds: ["c1"],
-    locationId: "l1",
     tracers: [{ id: "t2", characterId: "c1", kind: "speech", text: "meow", path: [{ t: 2.5, x: 0.5, y: 0.5 }] }],
   };
   const sb = { id: "x", title: "My Film", shots: [shot("a")], rev: 1 } as any;
@@ -318,7 +313,7 @@ test("describeCameraMove: words match the numbers", () => {
 test("the copilot's board brief reports real beat state, not the media list", async () => {
   const { boardBrief } = await import("./copilot");
   const p = basePipe();
-  p.beats = { s1: { ...emptyExt(), characterIds: ["c1"], locationId: "l1" } };
+  p.beats = { s1: { ...emptyExt(), characterIds: ["c1"] } };
   const board = {
     id: "b1",
     title: "Night Market",

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { captionImage, type Shot } from "./api";
+import { type Shot } from "./api";
 import { kindOf, type PS } from "./shared";
 import {
   BEAT_SECONDS,
@@ -13,7 +13,6 @@ import {
   pickModel,
   proposeRoster,
   proposeTracers,
-  sceneArtOf,
   ttsLine,
   type Pipeline,
 } from "./pipeline";
@@ -33,22 +32,15 @@ export default function AssetsPanel({
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [charPrompt, setCharPrompt] = useState("");
-  const [locPrompt, setLocPrompt] = useState("");
-  const phase = pipe.phase;
   const beats = shots.map((s) => ({ id: s.id, prompt: s.prompt }));
   const approved = pipe.characters.filter((c) => c.approved);
   const videoModel = pickModel(ps.models, "video");
   const musicModel = pickModel(ps.models, "music");
-  const placedBeats = shots.filter((s) => sceneArtOf(pipe, extOf(pipe, s.id))).length;
   const tracersDone = shots.filter((s) => extOf(pipe, s.id).tracers.length).length;
   const finalsDone = shots.filter((s) => extOf(pipe, s.id).finalClip).length;
-  // what "Render all" would actually produce: a beat needs some scene reference,
-  // and its own still counts. Counting it here means the button can say so
-  // before it is pressed rather than skipping in silence.
-  const renderable = shots.filter((s) => {
-    const x = extOf(pipe, s.id);
-    return !x.finalClip && (sceneArtOf(pipe, x) || s.result);
-  }).length;
+  // what "Render all" would actually produce — every un-rendered beat is
+  // renderable now that references are optional.
+  const renderable = shots.filter((s) => !extOf(pipe, s.id).finalClip).length;
   const allSpeech = shots.flatMap((s) =>
     extOf(pipe, s.id)
       .tracers.filter((t) => t.kind === "speech")
@@ -70,89 +62,22 @@ export default function AssetsPanel({
 
   const drivingPrompt = (c: { name: string; description: string; prompt: string }) =>
     `Character sheet of ${c.name}: ${c.description}. ${c.prompt} Full body, single character, neutral studio background, high detail, consistent design.`;
-  const locationPrompt = (l: { name: string; description: string; prompt: string }) =>
-    `Establishing background plate of ${l.name}: ${l.description}. ${l.prompt} Empty location, no people, no characters, no animals. Wide cinematic shot, consistent lighting.`;
 
-  // propose a cast/location roster from a free prompt (preferred) or the beats
-  const propose = (kind: "character" | "location", src: string, reset: () => void) =>
-    run("propose-" + kind, async () => {
-      const found = await proposeRoster(ps.apiKey, kind, src.trim() || beats);
+  // propose a cast from a free prompt (preferred) or the beats
+  const propose = (src: string, reset: () => void) =>
+    run("propose-character", async () => {
+      const found = await proposeRoster(ps.apiKey, src.trim() || beats);
       let added = 0;
       mut((p) => {
         added = 0; // updater may re-run (StrictMode) — recount
-        const list = kind === "character" ? p.characters : p.locations;
         for (const f of found) {
-          if (list.some((x) => x.name.toLowerCase() === f.name.toLowerCase())) continue;
+          if (p.characters.some((x) => x.name.toLowerCase() === f.name.toLowerCase())) continue;
           added++;
-          if (kind === "character")
-            p.characters.push({ id: newId(), name: f.name, description: f.description, approved: false, prompt: "", image: null });
-          else p.locations.push({ id: newId(), name: f.name, description: f.description, prompt: "", image: null });
+          p.characters.push({ id: newId(), name: f.name, description: f.description, approved: false, prompt: "", image: null });
         }
       });
       reset();
-      ps.toast(added ? `${added} ${kind === "character" ? "characters" : "locations"} proposed` : "0 new (all duplicates)", "gold");
-    });
-
-  /** The exercise is verbalising the place: a plate is one frame, but the words
-   *  are what every later render is conditioned on. Reading the description back
-   *  out of the image is also how you notice the image is of the wrong place. */
-  const verbalize = (l: { id: string; name: string; image: { url: string } | null }) =>
-    run("verbalize" + l.id, async () => {
-      if (!l.image) throw new Error("give this location an image first");
-      const said = await captionImage(
-        ps.apiKey,
-        l.image.url,
-        `Describe this place as a location entry for film continuity: architecture and materials, scale, terrain, time of day, weather, and the light. Two or three sentences. Describe only the place — ignore any people, creatures or vehicles in frame. No preamble.`,
-      );
-      mut((p) => void (p.locations.find((x) => x.id === l.id)!.description = said));
-      ps.toast(`${l.name} described from its plate`, "gold");
-    });
-
-  /** One press instead of three screens: propose the locations the beats imply,
-   *  render a plate for each, and assign every beat the one its text matches.
-   *  Existing locations, plates and assignments are left alone. */
-  const draftLocations = () =>
-    run("locations", async () => {
-      // mut lands on the parent's state, so this cannot read `pipe` back
-      // mid-run — it tracks the roster it is building itself.
-      let roster = [...pipe.locations];
-      if (!roster.length) {
-        setBusy("locations — proposing");
-        const found = await proposeRoster(ps.apiKey, "location", beats);
-        const fresh = found
-          .filter((f, i) => found.findIndex((g) => g.name.toLowerCase() === f.name.toLowerCase()) === i)
-          .map((f) => ({ id: newId(), name: f.name, description: f.description, prompt: "", image: null }));
-        if (!fresh.length) throw new Error("no locations came back — describe them yourself and try again");
-        mut((p) => {
-          for (const l of fresh) if (!p.locations.some((x) => x.id === l.id)) p.locations.push({ ...l });
-        });
-        roster = fresh;
-      }
-
-      for (const [i, l] of roster.entries()) {
-        if (l.image) continue;
-        setBusy(`locations — plate ${i + 1}/${roster.length}`);
-        const art = await genImage(ps, locationPrompt(l));
-        mut((p) => {
-          const hit = p.locations.find((x) => x.id === l.id);
-          if (hit) hit.image = art;
-        });
-      }
-
-      // assign by name mention, else everything unassigned lands on the first
-      // plate — a wrong location beats no location, and a beat can be re-pointed
-      setBusy("locations — assigning");
-      mut((p) => {
-        for (const s of shots) {
-          const x = extOf(p, s.id);
-          if (x.locationId) continue;
-          const text = s.prompt.toLowerCase();
-          const hit = roster.find((l) => l.name && text.includes(l.name.toLowerCase()));
-          x.locationId = (hit || roster[0]).id;
-          p.beats[s.id] = x;
-        }
-      });
-      ps.toast(`${roster.length} location${roster.length === 1 ? "" : "s"} ready and assigned to every beat`, "gold");
+      ps.toast(added ? `${added} characters proposed` : "0 new (all duplicates)", "gold");
     });
 
   return (
@@ -169,13 +94,13 @@ export default function AssetsPanel({
             placeholder="describe a character or the whole cast…"
             value={charPrompt}
             onChange={(e) => setCharPrompt(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && (charPrompt.trim() || beats.length) && propose("character", charPrompt, () => setCharPrompt(""))}
+            onKeyDown={(e) => e.key === "Enter" && (charPrompt.trim() || beats.length) && propose(charPrompt, () => setCharPrompt(""))}
           />
           <button
             type="button"
             className="beat-btn"
             disabled={busy != null || (!charPrompt.trim() && !beats.length)}
-            onClick={() => propose("character", charPrompt, () => setCharPrompt(""))}
+            onClick={() => propose(charPrompt, () => setCharPrompt(""))}
           >
             {busy === "propose-character" ? "proposing…" : charPrompt.trim() ? "Propose" : "Propose from beats"}
           </button>
@@ -251,115 +176,12 @@ export default function AssetsPanel({
         )}
       </div>
 
-      {/* ── Locations (shared library, driving images) ── */}
-      <div className="ap-sec">
-        <div className="ap-head">
-          <b>Locations</b>
-          <span className="bd-desc">define places → driving images · beats pick one for a consistent background</span>
-          <div className="grow" />
-          <input
-            className="ap-music"
-            style={{ maxWidth: 240 }}
-            placeholder="describe a location or the whole world…"
-            value={locPrompt}
-            onChange={(e) => setLocPrompt(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && (locPrompt.trim() || beats.length) && propose("location", locPrompt, () => setLocPrompt(""))}
-          />
-          <button
-            type="button"
-            className="beat-btn"
-            disabled={busy != null || (!locPrompt.trim() && !beats.length)}
-            onClick={() => propose("location", locPrompt, () => setLocPrompt(""))}
-          >
-            {busy === "propose-location" ? "proposing…" : locPrompt.trim() ? "Propose" : "Propose from beats"}
-          </button>
-          <button
-            type="button"
-            className="beat-btn gold-btn"
-            disabled={busy != null || !shots.length}
-            title="Propose locations from the beats, render a plate for each, and assign every beat one"
-            onClick={draftLocations}
-          >
-            {busy?.startsWith("locations") ? busy.replace("locations — ", "") + "…" : "AI draft locations"}
-          </button>
-          <button
-            type="button"
-            className="beat-btn"
-            onClick={() => mut((p) => p.locations.push({ id: newId(), name: "New location", description: "", prompt: "", image: null }))}
-          >
-            + Add
-          </button>
-        </div>
-        {pipe.locations.length > 0 && (
-          <div className="ap-chars">
-            {pipe.locations.map((l) => (
-              <div key={l.id} className={`ap-char${l.image ? " ok" : ""}`}>
-                <div
-                  className="ap-img"
-                  style={l.image ? { backgroundImage: `url(${l.image.url})`, backgroundSize: "cover", backgroundPosition: "center" } : {}}
-                />
-                <input
-                  className="ap-name"
-                  value={l.name}
-                  onChange={(e) => mut((p) => void (p.locations.find((x) => x.id === l.id)!.name = e.target.value))}
-                />
-                <textarea
-                  className="ap-desc"
-                  value={l.description}
-                  placeholder="visual description — drives the background plate"
-                  onChange={(e) => mut((p) => void (p.locations.find((x) => x.id === l.id)!.description = e.target.value))}
-                />
-                <input
-                  className="ap-name"
-                  value={l.prompt}
-                  placeholder="style tweak (optional) — added to the generate prompt"
-                  onChange={(e) => mut((p) => void (p.locations.find((x) => x.id === l.id)!.prompt = e.target.value))}
-                />
-                <div className="ap-row">
-                  <button
-                    type="button"
-                    className="beat-btn accent"
-                    disabled={busy != null || !l.description.trim()}
-                    title={l.description.trim() ? "" : "add a description first"}
-                    onClick={() =>
-                      run("loc" + l.id, async () => {
-                        const art = await genImage(ps, locationPrompt(l));
-                        mut((p) => void (p.locations.find((x) => x.id === l.id)!.image = art));
-                      })
-                    }
-                  >
-                    {busy === "loc" + l.id ? "…" : l.image ? "⟳" : "Generate"}
-                  </button>
-                  <button
-                    type="button"
-                    className="beat-btn"
-                    disabled={busy != null || !l.image}
-                    title={l.image ? "Write the description from this plate" : "needs an image first"}
-                    onClick={() => verbalize(l)}
-                  >
-                    {busy === "verbalize" + l.id ? "reading…" : "Verbalize"}
-                  </button>
-                  <button
-                    type="button"
-                    className="beat-btn"
-                    onClick={() => mut((p) => void (p.locations = p.locations.filter((x) => x.id !== l.id)))}
-                  >
-                    ✕
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
       {/* ── Tracers (batch AI draft) — unlocks once beats are locked ── */}
-      {phase >= 2 && (
         <div className="ap-sec">
           <div className="ap-head">
             <b>Tracers</b>
             <span className="bd-desc">
-              {tracersDone}/{shots.length} beats have motion staged · {placedBeats}/{shots.length} have a location · open a beat to fine-tune
+              {tracersDone}/{shots.length} beats have motion staged · open a beat to fine-tune
             </span>
             <div className="grow" />
             <button
@@ -385,10 +207,8 @@ export default function AssetsPanel({
             </button>
           </div>
         </div>
-      )}
 
       {/* ── Sound ── */}
-      {phase >= 2 && (
       <div className="ap-sec">
         <div className="ap-head">
           <b>Sound</b>
@@ -477,19 +297,14 @@ export default function AssetsPanel({
           {pipe.mix && <audio controls src={pipe.mix.url} />}
         </div>
       </div>
-      )}
 
-      {/* ── Phase 3: finals ── */}
-      {phase >= 2 && (
+      {/* ── Final renders ── */}
       <div className="ap-sec">
         <div className="ap-head">
-          <b>Phase 3 — Final renders</b>
+          <b>Final renders</b>
           <span className="bd-desc">
             {finalsDone}/{shots.length} clips{videoModel ? "" : " · no video model available right now"}
             {videoModel && renderable > 0 ? ` · ${renderable} ready to render` : ""}
-            {videoModel && shots.length - finalsDone - renderable > 0
-              ? ` · ${shots.length - finalsDone - renderable} need a location or a still first`
-              : ""}
           </span>
           <div className="grow" />
           <button
@@ -498,29 +313,21 @@ export default function AssetsPanel({
             disabled={busy != null || !videoModel}
             onClick={() =>
               run("finals", async () => {
-                let skipped = 0;
                 for (const [i, s] of shots.entries()) {
                   const x = extOf(pipe, s.id);
-                  // A beat with no location still has its own approved still —
-                  // that is a better scene reference than refusing to render.
-                  const scene = sceneArtOf(pipe, x) || (s.result ? { url: s.result.url, content_type: s.result.content_type } : null);
                   if (x.finalClip) continue;
-                  if (!scene) {
-                    skipped++;
-                    continue;
-                  }
                   setBusy(`finals ${i + 1}/${shots.length}`);
                   let overlay = x.tracerImage;
                   if (!overlay && x.tracers.length) overlay = await bakeTracerPng(ps, x.tracers, pipe.characters);
                   const prompt = x.finalPrompt.trim() || buildFinalPrompt(s.prompt, x, pipe.characters);
+                  // the beat's own still leads — it is the frame being animated
                   const refs = [
+                    s.result?.url || "",
                     ...approved.filter((c) => x.characterIds.includes(c.id)).map((c) => c.image?.url || ""),
-                    scene.url,
                     overlay?.url || "",
                   ].filter(Boolean);
                   const art = await genImage(ps, prompt, { refs, video: true });
                   mut((p) => {
-                    p.phase = 3; // a final actually landed → phase 3
                     const y = extOf(p, s.id);
                     y.tracerImage = overlay;
                     y.finalPrompt = prompt;
@@ -528,7 +335,6 @@ export default function AssetsPanel({
                     p.beats[s.id] = y;
                   });
                 }
-                if (skipped) ps.toast(`${skipped} beat${skipped === 1 ? "" : "s"} skipped — they have neither a location nor a still`);
               })
             }
           >
@@ -568,7 +374,6 @@ export default function AssetsPanel({
           </div>
         )}
       </div>
-      )}
     </div>
   );
 }

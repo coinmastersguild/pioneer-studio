@@ -1,6 +1,5 @@
 import { useRef, useState } from "react";
 import { captionImage, patchShot, uploadMedia, type MediaObject, type Shot } from "./api";
-import { critiqueResult } from "./copilot";
 import { isShotRunning, renderShot } from "./shots";
 import { fmtTime, kindOf, PH, type PS } from "./shared";
 import {
@@ -14,7 +13,6 @@ import {
   proposeTracers,
   REF_INTENTS,
   refIntentOf,
-  sceneArtOf,
   ttsLine,
   type Pipeline,
   type Tracer,
@@ -32,7 +30,6 @@ export default function BeatDialog({
   mut,
   onClose,
   onNext,
-  onDone,
 }: {
   ps: PS;
   shot: Shot;
@@ -41,26 +38,24 @@ export default function BeatDialog({
   mut(fn: (p: Pipeline) => void): void;
   onClose(): void;
   onNext(): void;
-  onDone(): void;
 }) {
   const [text, setText] = useState(shot.prompt);
   const [busy, setBusy] = useState<string | null>(null); // which row is working
   const [dragOver, setDragOver] = useState(false);
   const [picking, setPicking] = useState(false);
-  const [mismatch, setMismatch] = useState<{ ok: boolean; notes: string; fix: string } | null>(null);
   const picker = useRef<HTMLInputElement>(null);
   const ext = extOf(pipe, shot.id);
   const [finalPrompt, setFinalPrompt] = useState(ext.finalPrompt);
-  const scene = sceneArtOf(pipe, ext); // library location image (or legacy scene)
   const rendering = isShotRunning(shot);
   const t0 = index * 10; // fixed 10s grid (BEAT_SECONDS)
-  const phase = pipe.phase;
   const approved = pipe.characters.filter((c) => c.approved);
   const nameOf = (id: string | null) => pipe.characters.find((c) => c.id === id)?.name || "camera";
   const videoModel = pickModel(ps.models, "video");
   const speech = ext.tracers.filter((t) => t.kind === "speech");
-  // spec wants scene + tracers + approved cast for a final — gate stays loose, but say what's missing
+  // Everything is optional — a beat with only a still renders. Say what would
+  // sharpen the result, never block on it.
   const missingRefs = [
+    !shot.result && "no still",
     !ext.tracers.length && "no tracers",
     !approved.some((c) => ext.characterIds.includes(c.id)) && "no cast",
   ].filter(Boolean);
@@ -123,30 +118,6 @@ export default function BeatDialog({
     ps.toast("Described from the image", "gold");
   }
 
-  /** Does the still actually show the place this beat is set in? A battle written
-   *  for a village that renders a castle is only visible once the location has
-   *  been put into words — and the repair is an edit of that still, not a new one. */
-  const checkLocation = () =>
-    run("match", async () => {
-      const loc = pipe.locations.find((l) => l.id === ext.locationId);
-      if (!loc?.description.trim()) throw new Error("this beat's location has no description yet — Verbalize it first");
-      if (!shot.result) throw new Error("no still on this beat to check");
-      const verdict = await critiqueResult(
-        ps.apiKey,
-        `the scene takes place at ${loc.name}: ${loc.description}`,
-        shot.result.url,
-      );
-      setMismatch(verdict);
-      if (verdict.ok) ps.toast(`Still matches ${loc.name}`, "ok");
-    });
-
-  const applyLocationFix = () =>
-    run("match", async () => {
-      if (!mismatch?.fix || !shot.result) return;
-      await renderShot(ps, shot, { editFrom: shot.result.url, editPrompt: mismatch.fix });
-      setMismatch(null);
-    });
-
   const attachFile = (file: File) =>
     run("image", async () => {
       if (!ps.apiKey) return ps.toast("Paste your sk-pioneer key first");
@@ -181,7 +152,7 @@ export default function BeatDialog({
           </button>
         </div>
 
-        {/* ── Phase 1: text + placeholder ── */}
+        {/* ── Beat text + still ── */}
         <div className="bd-row">
           <div className="k">Beat text</div>
           <div className="v">
@@ -194,12 +165,7 @@ export default function BeatDialog({
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  if (phase === 1) void run("text", async () => {
-                    const fresh = await saveText();
-                    if (fresh && text.trim()) void renderShot(ps, fresh, { refs: beatRefs(pipe, ext) });
-                    onNext();
-                  });
-                  else void saveAndRender();
+                  void saveAndRender();
                 }
               }}
             />
@@ -207,36 +173,20 @@ export default function BeatDialog({
               <button type="button" className="beat-btn accent" disabled={rendering || busy === "text" || !text.trim()} onClick={saveAndRender}>
                 {rendering ? `${shot.status}…` : shot.result ? "Save & edit this image" : "Save & render placeholder"}
               </button>
-              {phase === 1 && (
-                <>
-                  <button
-                    type="button"
-                    className="beat-btn accent"
-                    disabled={!text.trim() || busy === "text"}
-                    onClick={() =>
-                      run("text", async () => {
-                        const fresh = await saveText();
-                        if (fresh && text.trim()) void renderShot(ps, fresh, { refs: beatRefs(pipe, ext) }); // render in background, move on
-                        onNext();
-                      })
-                    }
-                  >
-                    Save &amp; next beat →
-                  </button>
-                  <button
-                    type="button"
-                    className="beat-btn"
-                    onClick={() =>
-                      run("text", async () => {
-                        await saveText();
-                        onDone();
-                      })
-                    }
-                  >
-                    Done — lock beats
-                  </button>
-                </>
-              )}
+              <button
+                type="button"
+                className="beat-btn accent"
+                disabled={!text.trim() || busy === "text"}
+                onClick={() =>
+                  run("text", async () => {
+                    const fresh = await saveText();
+                    if (fresh && text.trim()) void renderShot(ps, fresh, { refs: beatRefs(pipe, ext) }); // render in background, move on
+                    onNext();
+                  })
+                }
+              >
+                Save &amp; next beat →
+              </button>
             </div>
           </div>
         </div>
@@ -267,7 +217,7 @@ export default function BeatDialog({
                 : rendering
                   ? `rendering — ${shot.status}`
                   : shot.result
-                    ? "fast draft still — the final look comes from the Phase 2/3 assets below"
+                    ? "fast draft still — the final look comes from the render below"
                     : "drop an image here, pick one below, or save the beat text to render a placeholder"}
             </div>
             <div className="bd-actions">
@@ -326,17 +276,7 @@ export default function BeatDialog({
           </div>
         </div>
 
-        {phase === 1 ? (
-          <div className="bd-row locked">
-            <div className="k">Phase 2+</div>
-            <div className="v">
-              <div className="bd-desc">
-                characters → scenes → tracers → sound → final render unlock once the beats are locked ("done")
-              </div>
-            </div>
-          </div>
-        ) : (
-          <>
+        <>
             {/* ── Characters in this beat ── */}
             <div className="bd-row">
               <div className="k">Characters</div>
@@ -369,64 +309,12 @@ export default function BeatDialog({
               </div>
             </div>
 
-            {/* ── Location (pick from the shared library) ── */}
-            <div className="bd-row">
-              <div className="k">Location</div>
-              <div className="v">
-                {pipe.locations.length ? (
-                  <select
-                    className="bd-text"
-                    style={{ minHeight: 0, height: 34 }}
-                    value={ext.locationId || ""}
-                    onChange={(e) =>
-                      mut((p) => {
-                        const x = extOf(p, shot.id);
-                        x.locationId = e.target.value || null;
-                        p.beats[shot.id] = x;
-                      })
-                    }
-                  >
-                    <option value="">— no location —</option>
-                    {pipe.locations.map((l) => (
-                      <option key={l.id} value={l.id}>
-                        {l.name}
-                        {l.image ? "" : " · no image yet"}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <div className="bd-desc">no locations yet — add them in the Locations library at the top of the board</div>
-                )}
-                {scene && <div className="bd-img" style={img(scene)} />}
-                {ext.locationId && shot.result && (
-                  <div className="bd-actions">
-                    <button type="button" className="beat-btn" disabled={!!busy} onClick={checkLocation}>
-                      {busy === "match" ? "comparing…" : "Does the still match this location?"}
-                    </button>
-                  </div>
-                )}
-                {mismatch && (
-                  <div className={`bd-desc${mismatch.ok ? "" : " warn"}`}>
-                    {mismatch.ok ? "Matches — " : "Mismatch — "}
-                    {mismatch.notes}
-                    {!mismatch.ok && mismatch.fix && (
-                      <div className="bd-actions" style={{ marginTop: 6 }}>
-                        <button type="button" className="beat-btn accent" disabled={!!busy} onClick={applyLocationFix}>
-                          Edit the still to match
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-
             {/* ── Motion tracers ── */}
             <div className="bd-row">
               <div className="k">Tracers</div>
               <div className="v">
                 <TracerEditor
-                  bg={scene?.url || shot.result?.url || null}
+                  bg={shot.result?.url || null}
                   tracers={ext.tracers}
                   chars={pipe.characters}
                   onChange={(next: Tracer[]) =>
@@ -602,20 +490,20 @@ export default function BeatDialog({
                       </span>{" "}
                     </>
                   )}
-                  refs: {ext.characterIds.length} character{ext.characterIds.length === 1 ? "" : "s"} ·{" "}
-                  {scene ? "location ✓" : "location ✗"} · {ext.tracers.length ? "tracers ✓" : "tracers ✗"}
+                  refs: {shot.result ? "still ✓" : "still ✗"} · {ext.characterIds.length} character
+                  {ext.characterIds.length === 1 ? "" : "s"} · {ext.tracers.length ? "tracers ✓" : "tracers ✗"}
                   {!videoModel && " — no video model available right now"}
                 </div>
                 {missingRefs.length > 0 && (
                   <div className="bd-desc">
-                    ⚠ {missingRefs.join(" · ")} — the final still renders, with less to keep it consistent
+                    {missingRefs.join(" · ")} — renders anyway, with less to keep it consistent
                   </div>
                 )}
                 <div className="bd-actions">
                   <button
                     type="button"
                     className="beat-btn accent"
-                    disabled={!videoModel || busy === "final" || !scene}
+                    disabled={!videoModel || busy === "final"}
                     onClick={() =>
                       run("final", async () => {
                         let overlay = ext.tracerImage;
@@ -628,9 +516,11 @@ export default function BeatDialog({
                           });
                         }
                         const prompt = finalPrompt.trim() || defaultFinal();
+                        // The still is the frame being animated, so it leads the
+                        // reference list; cast and tracer overlay refine it.
                         const refs = [
+                          shot.result?.url || "",
                           ...approved.filter((c) => ext.characterIds.includes(c.id)).map((c) => c.image?.url || ""),
-                          scene?.url || "",
                           overlay?.url || "",
                         ].filter(Boolean);
                         const art = await genImage(ps, prompt, { refs, video: true });
@@ -655,8 +545,7 @@ export default function BeatDialog({
                   ))}
               </div>
             </div>
-          </>
-        )}
+        </>
       </div>
     </div>
   );

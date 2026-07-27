@@ -17,10 +17,10 @@ export function boardBrief(board: Storyboard | null, pipe: Pipeline | null): str
   if (pipe) {
     const { score, band } = boardReadiness(shots, pipe);
     lines.push(
-      `Storyboard "${board.title || "untitled"}": ${shots.length} beats × 10s = ${shots.length * 10}s, phase ${pipe.phase}, readiness ${score}% (${band}).`,
+      `Storyboard "${board.title || "untitled"}": ${shots.length} beats × 10s = ${shots.length * 10}s, readiness ${score}% (${band}).`,
     );
     const cast = pipe.characters.map((c) => `${c.name}${c.approved ? "" : " (unapproved)"}${c.image ? "" : " (no image)"}`);
-    lines.push(`Cast: ${cast.length ? cast.join(", ") : "none"}. Locations: ${pipe.locations.map((l) => l.name).join(", ") || "none"}.`);
+    lines.push(`Cast: ${cast.length ? cast.join(", ") : "none"}.`);
     lines.push(`Music: ${pipe.music ? "rendered" : pipe.musicPrompt ? `prompt only — "${pipe.musicPrompt}"` : "none"}.`);
   } else {
     lines.push(`Storyboard "${board.title || "untitled"}": ${shots.length} beats.`);

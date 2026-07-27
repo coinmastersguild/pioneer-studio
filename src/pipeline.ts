@@ -1,6 +1,5 @@
-// Client-side pipeline state for later phases (characters, scenes,
-// tracers, sound, finals) plus every generation helper. State persists in
-// localStorage per storyboard id.
+// Client-side pipeline state (cast, tracers, sound, finals) plus every
+// generation helper. State persists in localStorage per storyboard id.
 // Uses localStorage for local-only projects. The isolated load/save boundary can
 // be replaced with server-backed persistence without changing these data shapes.
 import { API_BASE, authHeaders, blobToDataUrl, chatCompletion, submitJob, uploadMedia, type JobModel, type JobStatus, type Shot } from "./api";
@@ -14,16 +13,6 @@ export type Character = {
   description: string;
   approved: boolean;
   prompt: string; // extra styling for the driving image, optional
-  image: Artifact | null;
-};
-// Locations are a shared library, like characters: one driving
-// image per location, reused across every beat set there, so backgrounds stay
-// consistent the same way characters do.
-export type Location = {
-  id: string;
-  name: string;
-  description: string;
-  prompt: string;
   image: Artifact | null;
 };
 export type TracerPoint = { t: number; x: number; y: number }; // t in [0,10]s, x/y normalized 0–1
@@ -49,9 +38,6 @@ export const refIntentOf = (ext: BeatExt): (typeof REF_INTENTS)[number] =>
 
 export type BeatExt = {
   characterIds: string[];
-  locationId: string | null; // which library location this beat is set in
-  scenePrompt: string; // legacy one-off scene (kept for old docs; location wins)
-  scene: Artifact | null;
   tracers: Tracer[];
   tracerImage: Artifact | null;
   voices: Record<string, Artifact>; // tracerId → generated voice line
@@ -62,9 +48,7 @@ export type BeatExt = {
   staleFinal?: boolean; // upstream edited after the final rendered
 };
 export type Pipeline = {
-  phase: 1 | 2 | 3;
   characters: Character[];
-  locations: Location[];
   beats: Record<string, BeatExt>;
   musicPrompt: string;
   music: Artifact | null;
@@ -86,9 +70,6 @@ export const newId = () => Math.random().toString(36).slice(2, 9);
 
 export const emptyExt = (): BeatExt => ({
   characterIds: [],
-  locationId: null,
-  scenePrompt: "",
-  scene: null,
   tracers: [],
   tracerImage: null,
   voices: {},
@@ -110,7 +91,6 @@ export function loadPipeline(id: string): Pipeline {
     const raw = localStorage.getItem(KEY(id));
     if (raw) {
       const p = JSON.parse(raw) as Pipeline;
-      p.locations ||= []; // migrate docs saved before the location library
       pipeMem.set(id, structuredClone(p));
       return p;
     }
@@ -118,9 +98,7 @@ export function loadPipeline(id: string): Pipeline {
     /* corrupt → fresh */
   }
   return {
-    phase: (Number(localStorage.getItem("ps_phase")) as 1 | 2 | 3) || 1, // migrate the legacy key
     characters: [],
-    locations: [],
     beats: {},
     musicPrompt: "",
     music: null,
@@ -140,9 +118,7 @@ export function savePipeline(id: string, p: Pipeline): void {
     const strip = (a: Artifact | null) => (a && a.url.startsWith("data:") ? null : a);
     const slim: Pipeline = structuredClone(p);
     slim.characters.forEach((c) => (c.image = strip(c.image)));
-    slim.locations.forEach((l) => (l.image = strip(l.image)));
     for (const b of Object.values(slim.beats)) {
-      b.scene = strip(b.scene);
       b.tracerImage = strip(b.tracerImage);
       b.finalClip = strip(b.finalClip);
       b.voices = Object.fromEntries(Object.entries(b.voices).filter(([, v]) => !v.url.startsWith("data:")));
@@ -195,21 +171,13 @@ export function buildFinalPrompt(beatText: string, ext: BeatExt, chars: Characte
   );
 }
 
-export const locationOf = (p: Pipeline, ext: BeatExt): Location | undefined =>
-  p.locations.find((l) => l.id === ext.locationId);
-
-// the background art driving a beat: its library location's image, else a
-// legacy one-off scene from before the location library existed.
-export const sceneArtOf = (p: Pipeline, ext: BeatExt): Artifact | null =>
-  locationOf(p, ext)?.image || ext.scene;
-
-// character + location driving images for a beat — the refs that keep the
-// still/final consistent. Capped at 4 (multi_reference limit) by genImage.
+// The driving images for a beat — optional, and everything works without them.
+// Capped at 4 (multi_reference limit) by genImage.
 export const beatRefs = (p: Pipeline, ext: BeatExt): string[] =>
-  [
-    ...p.characters.filter((c) => ext.characterIds.includes(c.id)).map((c) => c.image?.url),
-    sceneArtOf(p, ext)?.url,
-  ].filter((u): u is string => !!u);
+  p.characters
+    .filter((c) => ext.characterIds.includes(c.id))
+    .map((c) => c.image?.url)
+    .filter((u): u is string => !!u);
 
 /* ── model picking — the server's models list decides what's live ── */
 
@@ -227,7 +195,7 @@ export function pickModel(
   const named = (m: JobModel, re: RegExp) => re.test(m.model);
   // s2v/lipsync models are speech-driven and the pose-enhance model is control-video
   // driven — neither takes our text+refs final-render params, so they must not open
-  // the Phase-3 gate (paid jobs would just fail). `ltx-enhance` matches /ltx/.
+  // the final-render lane (paid jobs would just fail). `ltx-enhance` matches /ltx/.
   const isVid = (m: JobModel) => has(m, /video|ltx|wan|kling|veo/i) && !has(m, /s2v|lipsync|enhance|pose/i);
   const isAud = (m: JobModel) => has(m, /music|acestep|tts|speech|voice|kokoro|audio/i);
   switch (want) {
@@ -247,7 +215,7 @@ export function pickModel(
         models.find((m) => m.endpoint === "edit" && named(m, /\bmage/i)) || models.find((m) => m.endpoint === "edit")
       );
     case "image_refs":
-      // The character/location-driven render. Qwen's edit checkpoint is the
+      // The reference-driven render. Qwen's edit checkpoint is the
       // identity-lock path and is Apache-2.0, so it leads; flux2-dev's
       // multi_reference is the fallback. Mage-Flow-Edit is deliberately NOT
       // preferred here — it returns the content gate's blank placeholder for
@@ -426,23 +394,17 @@ async function chatJSON<T>(apiKey: string, system: string, user: string): Promis
 const beatLines = (beats: { id: string; prompt: string }[]) =>
   beats.map((b, i) => `beat ${i + 1} (id=${b.id}): ${b.prompt || "(empty)"}`).join("\n");
 
-// Propose a cast or a location library from either the beat list or a free
-// prompt the user typed ("a grumpy detective and his robot dog in noir LA").
+// Propose a cast from either the beat list or a free prompt the user typed
+// ("a grumpy detective and his robot dog in noir LA").
 export async function proposeRoster(
   apiKey: string,
-  kind: "character" | "location",
   source: string | { id: string; prompt: string }[],
 ): Promise<{ name: string; description: string }[]> {
   const text = typeof source === "string" ? source : beatLines(source);
-  const noun = kind === "character" ? "characters (people, animals, creatures)" : "distinct locations/settings";
-  const desc =
-    kind === "character"
-      ? "visual description for a character sheet: species/build/clothing/colors"
-      : "visual description of the empty place: architecture/landscape/lighting/mood, NO characters or people";
   const arr = await chatJSON<{ name: string; description: string }[]>(
     apiKey,
-    `You are a film pre-production assistant. From the input, list the distinct ${noun}.
-Respond ONLY with a JSON array: [{"name":"...","description":"<${desc}, 1-2 sentences>"}]. No prose.`,
+    `You are a film pre-production assistant. From the input, list the distinct characters (people, animals, creatures).
+Respond ONLY with a JSON array: [{"name":"...","description":"<visual description for a character sheet: species/build/clothing/colors, 1-2 sentences>"}]. No prose.`,
     text,
   );
   return Array.isArray(arr) ? arr : [];

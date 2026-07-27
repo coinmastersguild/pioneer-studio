@@ -67,7 +67,7 @@ export async function renderShot(
     return;
   }
   const { model, endpoint } = opts || {};
-  // refs (character + location driving images) → render through a
+  // refs (character driving images) → render through a
   // multi_reference model so the beat still keeps their identity. No refs →
   // the cheap fast placeholder tier. ≤4 refs (multi_reference limit).
   const refs = (opts?.refs || []).filter(Boolean).slice(0, 4);

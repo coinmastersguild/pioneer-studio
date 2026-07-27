@@ -64,7 +64,6 @@ export default function BoardView({ ps }: { ps: PS }) {
       savePipeline(id, next);
       return next;
     });
-  const phase = pipe.phase;
   const psRef = useRef(ps);
   psRef.current = ps;
 
@@ -184,25 +183,6 @@ export default function BoardView({ ps }: { ps: PS }) {
     }
   }
 
-  function setPhaseTo(n: 1 | 2 | 3) {
-    // jumping forward with zero beats bypasses the "done" gate into an empty pipeline
-    if (n > 1 && !(psRef.current.board?.shots.length ?? 0)) return psRef.current.toast("Add at least one beat first");
-    mut((p) => void (p.phase = n));
-  }
-
-  // Completing this phase locks the beat list and fixes total runtime.
-  function markDone() {
-    const p = psRef.current;
-    const list = p.board?.shots || [];
-    if (!list.length) return p.toast("Add at least one beat first");
-    setPhaseTo(2);
-    setDialog(null);
-    p.toast(
-      `Beats locked — ${list.length} × 10s = ${fmtTime(list.length * 10)}. Tracers, sound & final render are open.`,
-      "gold",
-    );
-  }
-
   // Prompt-pack export: the whole board as portable markdown + JSON.
   function exportPack() {
     const p = psRef.current;
@@ -213,14 +193,13 @@ export default function BoardView({ ps }: { ps: PS }) {
     p.toast("Prompt pack + shot bible downloaded", "ok");
   }
 
-  const fnsRef = useRef({ renderAll, previewBoard, onAddBeat, markDone, exportPack });
-  fnsRef.current = { renderAll, previewBoard, onAddBeat, markDone, exportPack };
+  const fnsRef = useRef({ renderAll, previewBoard, onAddBeat, exportPack });
+  fnsRef.current = { renderAll, previewBoard, onAddBeat, exportPack };
 
   useEffect(() => {
     ps.registerSuggestions("board", [
       { label: "Add the next beat", run: () => fnsRef.current.onAddBeat() },
       { label: "Render every draft beat", run: () => fnsRef.current.renderAll() },
-      { label: "Done — lock the beats", run: () => fnsRef.current.markDone() },
       { label: "Preview the storyboard cut", run: () => fnsRef.current.previewBoard() },
       { label: "Export the prompt pack", run: () => fnsRef.current.exportPack() },
     ]);
@@ -228,13 +207,12 @@ export default function BoardView({ ps }: { ps: PS }) {
     registerActions([
       {
         name: "board.get_state",
-        description: "Storyboard snapshot: phase, beats (id, text, status), readiness per beat",
+        description: "Storyboard snapshot: beats (id, text, status), readiness per beat",
         run: () => {
           const p = psRef.current;
           const pl = pipeRef.current;
           const list = p.board?.shots || [];
           return {
-            phase: pl.phase,
             readiness: boardReadiness(list, pl),
             beats: list.map((s, i) => ({ index: i + 1, id: s.id, text: s.prompt, status: s.status, hasFinal: !!extOf(pl, s.id).finalClip })),
           };
@@ -264,7 +242,6 @@ export default function BoardView({ ps }: { ps: PS }) {
         },
       },
       { name: "board.render_all", description: "Render every draft beat", confirmation: "Starts paid image generation jobs", run: () => fnsRef.current.renderAll() },
-      { name: "board.mark_done", description: "Lock the beats — advance to phase 2", run: () => fnsRef.current.markDone() },
       { name: "board.preview", description: "Play the storyboard seed cut without exporting; Studio owns release export", run: () => fnsRef.current.previewBoard() },
       { name: "board.export_prompt_pack", description: "Download the prompt pack (.md) + shot bible (.json)", run: () => fnsRef.current.exportPack() },
     ]);
@@ -294,18 +271,6 @@ export default function BoardView({ ps }: { ps: PS }) {
         </div>
       </div>
       <div className="board-sub">
-        <span className="phase-rail">
-          {(["beats", "assets", "render"] as const).map((l, i) => (
-            <b key={l} className={phase === i + 1 ? "on" : ""} onClick={() => setPhaseTo((i + 1) as 1 | 2 | 3)}>
-              {"①②③"[i]} {l}
-            </b>
-          ))}
-        </span>
-        {phase === 1 && shots.length > 0 && (
-          <button type="button" className="beat-btn accent" style={{ flex: "0 0 auto" }} onClick={markDone}>
-            Done — lock beats
-          </button>
-        )}
         <span>
           runtime <b>{fmtTime(total)}</b>
         </span>
@@ -372,17 +337,15 @@ export default function BoardView({ ps }: { ps: PS }) {
                   <div className="ph-grain" />
                   <div className="num">{String(i + 1).padStart(2, "0")}</div>
                   <div className="dur">{durOf(s)}s</div>
-                  {phase > 1 && (
-                    <div
-                      className={`rdy ${readiness.perBeat[i].band}`}
-                      title={
-                        readiness.perBeat[i].components.filter((c) => c.value < 1).map((c) => c.hint).join(" · ") ||
-                        "ready for the final render"
-                      }
-                    >
-                      {readiness.perBeat[i].score}
-                    </div>
-                  )}
+                  <div
+                    className={`rdy ${readiness.perBeat[i].band}`}
+                    title={
+                      readiness.perBeat[i].components.filter((c) => c.value < 1).map((c) => c.hint).join(" · ") ||
+                      "ready for the final render"
+                    }
+                  >
+                    {readiness.perBeat[i].score}
+                  </div>
                   <div className={`stg ${stg.cls}`}>{stg.label}</div>
                   {stg.cls === "clip" && (
                     <div className="clip-badge">
@@ -532,7 +495,6 @@ export default function BoardView({ ps }: { ps: PS }) {
             mut={mut}
             onClose={() => setDialog(null)}
             onNext={nextBeat}
-            onDone={markDone}
           />
         ) : null;
       })()}
