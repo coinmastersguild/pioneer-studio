@@ -3,17 +3,18 @@ import { captionImage, patchShot, uploadMedia, type MediaObject, type Shot } fro
 import { isShotRunning, renderShot } from "./shots";
 import { fmtTime, kindOf, PH, type PS } from "./shared";
 import {
-  bakeTracerPng,
   beatRefs,
   buildFinalPrompt,
   extOf,
   genImage,
   markBeatEdited,
+  motionSummary,
   pickModel,
   proposeTracers,
   REF_INTENTS,
   refIntentOf,
   ttsLine,
+  writeDrivingPrompt,
   type Pipeline,
   type Tracer,
 } from "./pipeline";
@@ -52,13 +53,6 @@ export default function BeatDialog({
   const nameOf = (id: string | null) => pipe.characters.find((c) => c.id === id)?.name || "camera";
   const videoModel = pickModel(ps.models, "video");
   const speech = ext.tracers.filter((t) => t.kind === "speech");
-  // Everything is optional — a beat with only a still renders. Say what would
-  // sharpen the result, never block on it.
-  const missingRefs = [
-    !shot.result && "no still",
-    !ext.tracers.length && "no tracers",
-    !approved.some((c) => ext.characterIds.includes(c.id)) && "no cast",
-  ].filter(Boolean);
 
   const run = async (row: string, fn: () => Promise<void>) => {
     if (busy) return;
@@ -103,6 +97,28 @@ export default function BeatDialog({
     });
 
   const defaultFinal = () => buildFinalPrompt(shot.prompt, ext, pipe.characters);
+
+  /** The description says what the picture IS; the driving prompt says what the
+   *  ten seconds DO. Written from the still itself, so it never re-describes
+   *  what the model can already see. */
+  const draftDriving = () =>
+    run("driving", async () => {
+      if (!shot.result) throw new Error("give this beat a still first — the driving prompt is written from it");
+      const nameOf = (id: string | null) => pipe.characters.find((c) => c.id === id)?.name || (id ? "subject" : "camera");
+      const written = await writeDrivingPrompt(
+        ps.apiKey,
+        shot.result.url,
+        shot.prompt,
+        [motionSummary(ext.tracers, nameOf), ext.cameraMove].filter(Boolean).join(". "),
+      );
+      setFinalPrompt(written);
+      mut((p) => {
+        const x = extOf(p, shot.id);
+        x.finalPrompt = written;
+        p.beats[shot.id] = x;
+      });
+      ps.toast("Driving prompt written from the still", "gold");
+    });
 
   /** Attach an existing image as this beat's still, and let it describe itself.
    *  A picture dropped on an empty beat writes the beat text; a beat that
@@ -331,7 +347,6 @@ export default function BeatDialog({
                     mut((p) => {
                       const x = extOf(p, shot.id);
                       x.tracers = next;
-                      x.tracerImage = null; // overlay changed → needs a re-bake
                       p.beats[shot.id] = x;
                     })
                   }
@@ -348,30 +363,12 @@ export default function BeatDialog({
                         mut((p) => {
                           const x = extOf(p, shot.id);
                           x.tracers = ts;
-                          x.tracerImage = null;
                           p.beats[shot.id] = x;
                         });
                       })
                     }
                   >
                     AI draft
-                  </button>
-                  <button
-                    type="button"
-                    className="beat-btn accent"
-                    disabled={busy === "tracers" || !ext.tracers.length}
-                    onClick={() =>
-                      run("tracers", async () => {
-                        const art = await bakeTracerPng(ps, ext.tracers, pipe.characters);
-                        mut((p) => {
-                          const x = extOf(p, shot.id);
-                          x.tracerImage = art;
-                          p.beats[shot.id] = x;
-                        });
-                      })
-                    }
-                  >
-                    {ext.tracerImage ? "Overlay saved ✓ — re-bake" : "Save overlay PNG"}
                   </button>
                 </div>
               </div>
@@ -500,39 +497,30 @@ export default function BeatDialog({
                       </span>{" "}
                     </>
                   )}
-                  refs: {shot.result ? "still ✓" : "still ✗"} · {ext.characterIds.length} character
-                  {ext.characterIds.length === 1 ? "" : "s"} · {ext.tracers.length ? "tracers ✓" : "tracers ✗"}
+                  sends: this prompt + {shot.result ? "the still above" : "no image (text→video)"}
+                  {ext.tracers.length ? " · tracers ride along as words in the prompt, never as pixels" : ""}
                   {!videoModel && " — no video model available right now"}
                 </div>
-                {missingRefs.length > 0 && (
+                {!shot.result && (
                   <div className="bd-desc">
-                    {missingRefs.join(" · ")} — renders anyway, with less to keep it consistent
+                    no still on this beat — the clip is generated from the prompt alone
                   </div>
                 )}
                 <div className="bd-actions">
+                  <button type="button" className="beat-btn" disabled={!!busy || !shot.result} onClick={draftDriving}>
+                    {busy === "driving" ? "writing…" : "Write driving prompt"}
+                  </button>
                   <button
                     type="button"
                     className="beat-btn accent"
                     disabled={!videoModel || busy === "final"}
                     onClick={() =>
                       run("final", async () => {
-                        let overlay = ext.tracerImage;
-                        if (!overlay && ext.tracers.length) {
-                          overlay = await bakeTracerPng(ps, ext.tracers, pipe.characters);
-                          mut((p) => {
-                            const x = extOf(p, shot.id);
-                            x.tracerImage = overlay;
-                            p.beats[shot.id] = x;
-                          });
-                        }
                         const prompt = finalPrompt.trim() || defaultFinal();
-                        // The still is the frame being animated, so it leads the
-                        // reference list; cast and tracer overlay refine it.
-                        const refs = [
-                          shot.result?.url || "",
-                          ...approved.filter((c) => ext.characterIds.includes(c.id)).map((c) => c.image?.url || ""),
-                          overlay?.url || "",
-                        ].filter(Boolean);
+                        // Text + the one frame being animated. Nothing else: a
+                        // character sheet drags its own style in and fights the
+                        // still, and a tracer overlay gets drawn into the video.
+                        const refs = shot.result ? [shot.result.url] : [];
                         const art = await genImage(ps, prompt, { refs, video: true });
                         mut((p) => {
                           const x = extOf(p, shot.id);

@@ -3,7 +3,6 @@ import { type Shot } from "./api";
 import { kindOf, type PS } from "./shared";
 import {
   BEAT_SECONDS,
-  bakeTracerPng,
   buildFinalPrompt,
   extOf,
   genImage,
@@ -317,19 +316,12 @@ export default function AssetsPanel({
                   const x = extOf(pipe, s.id);
                   if (x.finalClip) continue;
                   setBusy(`finals ${i + 1}/${shots.length}`);
-                  let overlay = x.tracerImage;
-                  if (!overlay && x.tracers.length) overlay = await bakeTracerPng(ps, x.tracers, pipe.characters);
                   const prompt = x.finalPrompt.trim() || buildFinalPrompt(s.prompt, x, pipe.characters);
-                  // the beat's own still leads — it is the frame being animated
-                  const refs = [
-                    s.result?.url || "",
-                    ...approved.filter((c) => x.characterIds.includes(c.id)).map((c) => c.image?.url || ""),
-                    overlay?.url || "",
-                  ].filter(Boolean);
+                  // text + the one frame being animated, nothing else
+                  const refs = s.result ? [s.result.url] : [];
                   const art = await genImage(ps, prompt, { refs, video: true });
                   mut((p) => {
                     const y = extOf(p, s.id);
-                    y.tracerImage = overlay;
                     y.finalPrompt = prompt;
                     y.finalClip = art;
                     p.beats[s.id] = y;

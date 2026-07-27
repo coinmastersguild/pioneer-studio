@@ -73,6 +73,16 @@ test("pose-controlled LTX is routed separately from ordinary video", () => {
   expect(pickModel(models, "motion_video")?.model).toBe("ltx-enhance");
 });
 
+test("a beat with no still renders text→video, never an empty keyframe list", () => {
+  const models = [
+    { model: "ltx-2.3", endpoint: "generate", credits: 500, note: "LTX-Video text→video mp4" },
+    { model: "ltx-2.3", endpoint: "multi_reference", credits: 750, note: "1-4 reference images → video mp4" },
+  ];
+  // with a still to animate, the keyframe endpoint; without one, plain text→video
+  expect(pickModel(models, "video")?.endpoint).toBe("multi_reference");
+  expect(pickModel(models, "video_text")?.endpoint).toBe("generate");
+});
+
 test("mage-flow wins generation and edit even when flux2-dev's notes say 'image'", () => {
   // flux2-dev listed first, notes containing "reference-image" — the substring
   // "mage" inside "image" must not count as a Mage match

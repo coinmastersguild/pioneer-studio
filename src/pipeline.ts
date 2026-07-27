@@ -2,7 +2,7 @@
 // generation helper. State persists in localStorage per storyboard id.
 // Uses localStorage for local-only projects. The isolated load/save boundary can
 // be replaced with server-backed persistence without changing these data shapes.
-import { API_BASE, authHeaders, blobToDataUrl, chatCompletion, submitJob, uploadMedia, type JobModel, type JobStatus, type Shot } from "./api";
+import { API_BASE, authHeaders, blobToDataUrl, captionImage, chatCompletion, submitJob, uploadMedia, type JobModel, type JobStatus, type Shot } from "./api";
 import { kindOf, type PS } from "./shared";
 import type { StudioExportPlan } from "./studioTimeline";
 
@@ -39,7 +39,6 @@ export const refIntentOf = (ext: BeatExt): (typeof REF_INTENTS)[number] =>
 export type BeatExt = {
   characterIds: string[];
   tracers: Tracer[];
-  tracerImage: Artifact | null;
   voices: Record<string, Artifact>; // tracerId → generated voice line
   finalPrompt: string;
   finalClip: Artifact | null;
@@ -71,7 +70,6 @@ export const newId = () => Math.random().toString(36).slice(2, 9);
 export const emptyExt = (): BeatExt => ({
   characterIds: [],
   tracers: [],
-  tracerImage: null,
   voices: {},
   finalPrompt: "",
   finalClip: null,
@@ -119,7 +117,6 @@ export function savePipeline(id: string, p: Pipeline): void {
     const slim: Pipeline = structuredClone(p);
     slim.characters.forEach((c) => (c.image = strip(c.image)));
     for (const b of Object.values(slim.beats)) {
-      b.tracerImage = strip(b.tracerImage);
       b.finalClip = strip(b.finalClip);
       b.voices = Object.fromEntries(Object.entries(b.voices).filter(([, v]) => !v.url.startsWith("data:")));
     }
@@ -160,6 +157,29 @@ export function buildPreviewCut(shots: Shot[], pipe: Pipeline): PreviewCut {
   return { items, audio: pipe.mix?.url || null, allVideo, skipped };
 }
 
+/** The prompt that drives the video is not the beat's description. The still is
+ *  handed to the model as the frame it animates, so re-describing what is
+ *  already visible spends the prompt fighting the picture. A driving prompt
+ *  says what CHANGES: the action as it progresses, the camera, the pacing. */
+export async function writeDrivingPrompt(
+  apiKey: string,
+  stillUrl: string,
+  beatText: string,
+  motion: string,
+): Promise<string> {
+  const intent = [beatText.trim() && `What the beat is: ${beatText.trim()}`, motion && `Staged motion: ${motion}`]
+    .filter(Boolean)
+    .join("\n");
+  return captionImage(
+    apiKey,
+    stillUrl,
+    `This image is the opening frame of a 10-second shot and is already given to the video model as its reference, so do NOT describe appearance, wardrobe, setting, or style — it can see all of that.
+Write only what CHANGES across the ten seconds: the subject's action and how it progresses, the camera move, and the pacing.
+Two or three sentences, present tense, concrete physical motion. No preamble, no quotes, no shot-list headings.
+${intent}`,
+  );
+}
+
 // The default final-render prompt: beat text + tracer motion + solved camera
 // move + reference-intent instruction (reuses the existing motionSummary).
 export function buildFinalPrompt(beatText: string, ext: BeatExt, chars: Character[]): string {
@@ -186,7 +206,7 @@ export const beatRefs = (p: Pipeline, ext: BeatExt): string[] =>
 const LIST_EDIT = /qwen|\bmage/i;
 export function pickModel(
   models: JobModel[],
-  want: "image" | "image_refs" | "image_edit" | "video" | "motion_video" | "tts" | "music",
+  want: "image" | "image_refs" | "image_edit" | "video" | "video_text" | "motion_video" | "tts" | "music",
 ): JobModel | undefined {
   const has = (m: JobModel, re: RegExp) => re.test(`${m.model} ${m.endpoint} ${m.note || ""}`);
   // Naming a specific checkpoint must read the model id only. Notes are prose
@@ -201,6 +221,10 @@ export function pickModel(
   switch (want) {
     case "video":
       return models.find((m) => isVid(m) && m.endpoint === "multi_reference") || models.find(isVid);
+    case "video_text":
+      // no still to animate — text→video, never a keyframe endpoint that would
+      // be handed an empty image list
+      return models.find((m) => isVid(m) && m.endpoint === "generate") || models.find(isVid);
     case "motion_video":
       return models.find((m) => m.endpoint === "enhance" && has(m, /ltx|pose|motion|control/i));
     case "tts":
@@ -258,7 +282,7 @@ export async function genImage(
 ): Promise<Artifact> {
   const refs = (opts?.refs || []).filter(Boolean).slice(0, 4);
   const m = opts?.video
-    ? pickModel(ps.models, "video")
+    ? pickModel(ps.models, refs.length ? "video" : "video_text")
     : refs.length
       ? pickModel(ps.models, "image_refs") || pickModel(ps.models, "image")
       : pickModel(ps.models, "image");
@@ -467,49 +491,6 @@ async function storeArtifact(ps: PS, blob: Blob, name: string): Promise<Artifact
   return { url: await blobToDataUrl(blob), content_type: blob.type };
 }
 
-export async function bakeTracerPng(ps: PS, tracers: Tracer[], chars: Character[]): Promise<Artifact> {
-  const W = 1280;
-  const H = 720;
-  const cv = document.createElement("canvas");
-  cv.width = W;
-  cv.height = H;
-  const ctx = cv.getContext("2d")!;
-  ctx.lineWidth = 6;
-  ctx.font = "600 22px monospace";
-  ctx.lineJoin = "round";
-  for (const t of tracers) {
-    const col = colorFor(chars, t.characterId);
-    ctx.strokeStyle = col;
-    ctx.fillStyle = col;
-    if (t.path.length > 1) {
-      ctx.beginPath();
-      t.path.forEach((p, i) => (i ? ctx.lineTo(p.x * W, p.y * H) : ctx.moveTo(p.x * W, p.y * H)));
-      ctx.stroke();
-      // arrowhead on the last segment
-      const a = t.path[t.path.length - 2];
-      const b = t.path[t.path.length - 1];
-      const ang = Math.atan2(b.y * H - a.y * H, b.x * W - a.x * W);
-      ctx.beginPath();
-      ctx.moveTo(b.x * W, b.y * H);
-      ctx.lineTo(b.x * W - 18 * Math.cos(ang - 0.5), b.y * H - 18 * Math.sin(ang - 0.5));
-      ctx.lineTo(b.x * W - 18 * Math.cos(ang + 0.5), b.y * H - 18 * Math.sin(ang + 0.5));
-      ctx.fill();
-    }
-    for (const p of t.path) {
-      ctx.beginPath();
-      ctx.arc(p.x * W, p.y * H, 9, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillText(`${p.t.toFixed(1)}s`, p.x * W + 12, p.y * H - 12);
-    }
-    if (t.kind === "speech" && t.text && t.path[0])
-      ctx.fillText(`“${t.text}”`, t.path[0].x * W + 12, t.path[0].y * H + 30);
-  }
-  const blob = await new Promise<Blob>((res, rej) => cv.toBlob((b) => (b ? res(b) : rej(new Error("bake failed"))), "image/png"));
-  return storeArtifact(ps, blob, `tracer-${Date.now()}.png`);
-}
-
-/* ── sound mix — OfflineAudioContext → WAV → media ── */
-// Browser mix; a server assembly job is preferable for long runtimes.
 export async function mixAudio(
   ps: PS,
   parts: { url: string; at: number; gain?: number }[],
