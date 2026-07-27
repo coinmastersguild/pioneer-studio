@@ -83,10 +83,18 @@ export default function BeatDialog({
     return sb.shots.find((s) => s.id === shot.id) || null;
   }
 
+  // Saving is only ever saving. Generating spends credits and replaces the
+  // picture, so it happens when the user presses generate — never as a side
+  // effect of writing text down.
+  const save = () =>
+    run("text", async () => {
+      if (await saveText()) ps.toast("Beat text saved", "ok");
+    });
+
   // A beat that already has a still gets *edited* from it — the picture the user
   // put there is the subject, and the text is the instruction. Only an empty
-  // beat generates from nothing.
-  const saveAndRender = () =>
+  // beat generates from nothing. Saves first: the text IS the instruction.
+  const generate = () =>
     run("text", async () => {
       const fresh = await saveText();
       if (!fresh || !text.trim()) return;
@@ -165,22 +173,24 @@ export default function BeatDialog({
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  void saveAndRender();
+                  void save();
                 }
               }}
             />
             <div className="bd-actions">
-              <button type="button" className="beat-btn accent" disabled={rendering || busy === "text" || !text.trim()} onClick={saveAndRender}>
-                {rendering ? `${shot.status}…` : shot.result ? "Save & edit this image" : "Save & render placeholder"}
+              <button type="button" className="beat-btn accent" disabled={busy === "text" || !text.trim()} onClick={save}>
+                {busy === "text" ? "saving…" : "Save"}
+              </button>
+              <button type="button" className="beat-btn" disabled={rendering || !!busy || !text.trim()} onClick={generate}>
+                {rendering ? `${shot.status}…` : shot.result ? "Edit this image ⟳" : "Generate still"}
               </button>
               <button
                 type="button"
-                className="beat-btn accent"
+                className="beat-btn"
                 disabled={!text.trim() || busy === "text"}
                 onClick={() =>
                   run("text", async () => {
-                    const fresh = await saveText();
-                    if (fresh && text.trim()) void renderShot(ps, fresh, { refs: beatRefs(pipe, ext) }); // render in background, move on
+                    await saveText();
                     onNext();
                   })
                 }

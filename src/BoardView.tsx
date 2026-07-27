@@ -99,15 +99,8 @@ export default function BoardView({ ps }: { ps: PS }) {
     const sb = await patchShot(p.apiKey, undefined, shotId, { prompt: editText });
     p.setBoard(sb);
     mut((pl) => markBeatEdited(pl, shotId)); // Downstream artifacts become stale.
-    // a described beat renders immediately — with its cast + location driving
-    // images as refs when they exist (consistency), else a fast placeholder
-    const fresh = sb.shots.find((s) => s.id === shotId);
-    // never over a still that is already there — an image the user attached must
-    // not be replaced by a generated one just because the text changed
-    if (fresh && editText.trim() && !fresh.result && (fresh.status === "empty" || fresh.status === "failed"))
-      void renderShot(p, fresh, { refs: beatRefs(pipeRef.current, extOf(pipeRef.current, shotId)) }).catch((e: any) =>
-        p.toast(String(e.message || e)),
-      );
+    // Writing text down never spends credits — the beat card's own render
+    // button is how a picture gets made.
   }
 
   async function onDelete(shotId: string) {
@@ -221,23 +214,44 @@ export default function BoardView({ ps }: { ps: PS }) {
       { name: "board.add_beat", description: "Add a new beat (opens its dialog)", run: () => fnsRef.current.onAddBeat() },
       {
         name: "board.set_beat_text",
-        description: "Set a beat's text and render its placeholder — params: { id, text }",
+        description: "Set a beat's text. Saves only — call board.render_beat to make a picture. Params: { id, text }",
         parameters: {
           type: "object",
           properties: { id: { type: "string", description: "Beat id from board.get_state" }, text: { type: "string" } },
           required: ["id", "text"],
           additionalProperties: false,
         },
-        confirmation: "Changes beat text and starts a paid placeholder render",
         run: async (params) => {
           const p = psRef.current;
           const id = String(params?.id || "");
-          const text = String(params?.text || "");
-          const sb = await patchShot(p.apiKey, undefined, id, { prompt: text });
+          const sb = await patchShot(p.apiKey, undefined, id, { prompt: String(params?.text || "") });
           p.setBoard(sb);
           mut((pl) => markBeatEdited(pl, id)); // same staleness contract as the UI paths
-          const fresh = sb.shots.find((s) => s.id === id);
-          if (fresh && text.trim()) await renderShot(p, fresh, { refs: beatRefs(pipeRef.current, extOf(pipeRef.current, id)) });
+          return { ok: true };
+        },
+      },
+      {
+        name: "board.render_beat",
+        description: "Render one beat's still — edits its existing image when it has one. Params: { id }",
+        parameters: {
+          type: "object",
+          properties: { id: { type: "string", description: "Beat id from board.get_state" } },
+          required: ["id"],
+          additionalProperties: false,
+        },
+        confirmation: "Starts a paid image generation job",
+        run: async (params) => {
+          const p = psRef.current;
+          const id = String(params?.id || "");
+          const shot = (p.board?.shots || []).find((s) => s.id === id);
+          if (!shot) throw new Error(`no beat ${id}`);
+          await renderShot(
+            p,
+            shot,
+            shot.result
+              ? { editFrom: shot.result.url }
+              : { refs: beatRefs(pipeRef.current, extOf(pipeRef.current, id)) },
+          );
           return { ok: true };
         },
       },
