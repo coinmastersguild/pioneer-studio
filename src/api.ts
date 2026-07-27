@@ -520,6 +520,17 @@ export const patchShot = async (
     Object.assign(sbShot(sb, id), patch, { updatedAt: Date.now() });
   });
 
+/** Move a beat. `before` is the insert slot in the CURRENT list (0..length);
+ *  `order` is re-derived so beat numbers always follow position. */
+export const moveShot = async (_k: string, _rev: number | undefined, id: string, before: number): Promise<Storyboard> =>
+  sbEdit((sb) => {
+    const from = sb.shots.findIndex((s) => s.id === id);
+    if (from < 0) throw new Error("shot not found");
+    const [s] = sb.shots.splice(from, 1);
+    sb.shots.splice(before > from ? before - 1 : before, 0, s);
+    sb.shots.forEach((x, i) => (x.order = i));
+  });
+
 export const deleteShot = async (_k: string, _rev: number | undefined, id: string): Promise<Storyboard> =>
   sbEdit((sb) => {
     sb.shots = sb.shots.filter((s) => s.id !== id).map((s, i) => ({ ...s, order: i }));

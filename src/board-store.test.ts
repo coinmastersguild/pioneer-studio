@@ -10,7 +10,7 @@ const mem = new Map<string, string>();
   removeItem: (k: string) => void mem.delete(k),
 };
 
-const { addShot, attachShotResult, deleteShot, fetchStoryboard, patchShot } = await import("./api");
+const { addShot, attachShotResult, deleteShot, fetchStoryboard, moveShot, patchShot } = await import("./api");
 const { buildPreviewCut } = await import("./pipeline");
 type Shot = import("./api").Shot;
 type Pipeline = import("./pipeline").Pipeline;
@@ -65,4 +65,19 @@ test("local storyboard: add → patch → attach → delete", async () => {
 
   sb = await deleteShot("k", sb.rev, id);
   expect(sb.shots.length).toBe(0);
+});
+
+test("moveShot: reorders and renumbers `order`", async () => {
+  let sb = await fetchStoryboard("");
+  const before = sb.shots.length;
+  for (const p of ["m1", "m2", "m3"]) sb = await addShot("", undefined, { prompt: p });
+  const [a, b, c] = sb.shots.slice(before).map((s) => s.id);
+
+  sb = await moveShot("", undefined, c, before); // last → in front of the group
+  expect(sb.shots.slice(before).map((s) => s.id)).toEqual([c, a, b]);
+
+  sb = await moveShot("", undefined, c, before + 2); // back into the middle
+  expect(sb.shots.slice(before).map((s) => s.id)).toEqual([a, c, b]);
+
+  expect(sb.shots.map((s) => s.order)).toEqual(sb.shots.map((_, i) => i));
 });

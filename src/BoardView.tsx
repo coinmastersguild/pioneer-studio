@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { addShot, deleteShot, fetchStoryboard, patchShot, type Shot } from "./api";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { addShot, deleteShot, fetchStoryboard, moveShot, patchShot, type Shot } from "./api";
 import { renderShot, trackShotJob } from "./shots";
 import { aiPress, aiRelease } from "./ghost";
 import { fmtTime, kindOf, PH, type PS } from "./shared";
@@ -43,6 +43,8 @@ export default function BoardView({ ps }: { ps: PS }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
   const [dialog, setDialog] = useState<string | null>(null);
+  // drag-to-reorder: `at` is the insert slot the pointer is currently over
+  const [drag, setDrag] = useState<{ id: string; from: number; at: number } | null>(null);
   const [release, setRelease] = useState<{ url?: string; items?: PreviewItem[]; audio?: string | null } | null>(null);
   // Pipeline state: phase, characters, scenes, tracers, sound, and finals.
   const [pipe, setPipe] = useState<Pipeline>(() => loadPipeline(ps.board?.id || "default"));
@@ -113,6 +115,32 @@ export default function BoardView({ ps }: { ps: PS }) {
       if (pl.mix) pl.mixStale = true;
     });
   }
+
+  async function onDrop() {
+    const d = drag;
+    setDrag(null);
+    if (!d || d.at === d.from || d.at === d.from + 1) return; // no-op slots
+    const p = psRef.current;
+    const sb = await moveShot(p.apiKey, p.board?.rev, d.id, d.at);
+    p.setBoard(sb);
+    mut((pl) => {
+      if (pl.mix) pl.mixStale = true; // voice offsets follow beat order
+    });
+  }
+
+  const dragProps = (i: number) => ({
+    onDragOver: (e: DragEvent) => {
+      if (!drag) return;
+      e.preventDefault();
+      const r = e.currentTarget.getBoundingClientRect();
+      const at = e.clientX < r.left + r.width / 2 ? i : i + 1;
+      if (at !== drag.at) setDrag({ ...drag, at });
+    },
+    onDrop: (e: DragEvent) => {
+      e.preventDefault();
+      void onDrop();
+    },
+  });
 
   /* ── copilot: render every draft beat, visibly ── */
   async function renderAll() {
@@ -316,8 +344,17 @@ export default function BoardView({ ps }: { ps: PS }) {
             return (
               <div
                 key={s.id}
-                className={`beat${selected === s.id ? " sel" : ""}`}
+                className={`beat${selected === s.id ? " sel" : ""}${drag?.id === s.id ? " dragging" : ""}${
+                  drag && drag.at === i && drag.at !== drag.from && drag.at !== drag.from + 1 ? " dz-l" : ""
+                }`}
                 data-id={s.id}
+                draggable={editing !== s.id}
+                onDragStart={(e) => {
+                  e.dataTransfer.effectAllowed = "move";
+                  setDrag({ id: s.id, from: i, at: i });
+                }}
+                onDragEnd={() => setDrag(null)}
+                {...dragProps(i)}
                 onClick={() => {
                   setSelected(s.id);
                   setDialog(s.id); // Pressing a beat opens its pipeline dialog.
@@ -445,7 +482,19 @@ export default function BoardView({ ps }: { ps: PS }) {
               </div>
             );
           })}
-          <div className="beat add" onClick={onAddBeat}>
+          <div
+            className={`beat add${drag && drag.at === shots.length && drag.from !== shots.length - 1 ? " dz-l" : ""}`}
+            onClick={onAddBeat}
+            onDragOver={(e) => {
+              if (!drag) return;
+              e.preventDefault();
+              if (drag.at !== shots.length) setDrag({ ...drag, at: shots.length });
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              void onDrop();
+            }}
+          >
             <div className="inner">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
                 <path d="M12 5v14M5 12h14" />

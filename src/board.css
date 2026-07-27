@@ -34,6 +34,10 @@
 }
 .beat:hover{ border-color:var(--border-strong); box-shadow:var(--shadow-md); }
 .beat.sel{ border-color:var(--accent); box-shadow:0 0 0 1px var(--accent), var(--shadow-md); }
+.beat[draggable="true"]{ cursor:grab; }
+.beat.dragging{ opacity:.4; cursor:grabbing; }
+/* drop slot: a line on the card the beat would land before */
+.beat.dz-l, .beat.dz-l:hover, .beat.add.dz-l{ box-shadow:inset 4px 0 0 var(--accent); }
 .beat .frame{ aspect-ratio:16/9; position:relative; background:var(--bg-elevated); overflow:hidden; }
 .beat .frame .fill{ position:absolute; inset:0; transition:filter .5s; }
 .beat .frame video.fill{ width:100%; height:100%; object-fit:cover; }
