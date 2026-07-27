@@ -212,11 +212,19 @@ export const beatRefs = (p: Pipeline, ext: BeatExt): string[] =>
   ].filter((u): u is string => !!u);
 
 /* ── model picking — the server's models list decides what's live ── */
+
+// Edit endpoints whose reference param is a list (`images`). flux2-dev's `edit`
+// takes exactly one (`image`), so it can only ever carry the first reference.
+const LIST_EDIT = /qwen|\bmage/i;
 export function pickModel(
   models: JobModel[],
   want: "image" | "image_refs" | "image_edit" | "video" | "motion_video" | "tts" | "music",
 ): JobModel | undefined {
   const has = (m: JobModel, re: RegExp) => re.test(`${m.model} ${m.endpoint} ${m.note || ""}`);
+  // Naming a specific checkpoint must read the model id only. Notes are prose
+  // and mention other models ("use qwen-image.edit for…"), so matching them
+  // picks whatever the note talks about instead of what the entry is.
+  const named = (m: JobModel, re: RegExp) => re.test(m.model);
   // s2v/lipsync models are speech-driven and the pose-enhance model is control-video
   // driven — neither takes our text+refs final-render params, so they must not open
   // the Phase-3 gate (paid jobs would just fail). `ltx-enhance` matches /ltx/.
@@ -234,18 +242,27 @@ export function pickModel(
     case "image_edit":
       // Editing an existing still, never regenerating it from scratch. Mage-Flow's
       // edit checkpoint wins when the account exposes it; flux2-dev edit until then.
-      // \bmage so "reference-image" in flux2-dev's note doesn't match.
+      // \bmage, because "mage" is also the tail of "i-mage" and "qwen-i-mage".
       return (
-        models.find((m) => m.endpoint === "edit" && has(m, /\bmage/i)) || models.find((m) => m.endpoint === "edit")
+        models.find((m) => m.endpoint === "edit" && named(m, /\bmage/i)) || models.find((m) => m.endpoint === "edit")
       );
     case "image_refs":
-      // genImage handles both param shapes, so an edit-endpoint model is a valid ref model
-      return models.find((m) => !isVid(m) && m.endpoint === "multi_reference") || models.find((m) => !isVid(m) && m.endpoint === "edit");
+      // The character/location-driven render. Qwen's edit checkpoint is the
+      // identity-lock path and is Apache-2.0, so it leads; flux2-dev's
+      // multi_reference is the fallback. Mage-Flow-Edit is deliberately NOT
+      // preferred here — it returns the content gate's blank placeholder for
+      // 2+ references plus a descriptive prompt (verified on the box), and it
+      // only reaches this lane if nothing else on the account can take refs.
+      return (
+        models.find((m) => m.endpoint === "edit" && named(m, /qwen/i)) ||
+        models.find((m) => !isVid(m) && m.endpoint === "multi_reference") ||
+        models.find((m) => !isVid(m) && m.endpoint === "edit")
+      );
     default:
       // Mage-Flow-Turbo is the plain-generation default (fast, MIT-licensed);
       // flux2-dev stays the fallback where the account doesn't expose it.
       return (
-        models.find((m) => m.endpoint === "generate" && has(m, /\bmage/i)) ||
+        models.find((m) => m.endpoint === "generate" && named(m, /\bmage/i)) ||
         models.find((m) => m.model === "flux2-dev" && m.endpoint === "generate") ||
         models.find((m) => m.endpoint === "generate" && !isVid(m) && !isAud(m)) ||
         models[0]
@@ -280,7 +297,12 @@ export async function genImage(
   if (!m) throw new Error(opts?.video ? "no video model available right now" : "no image model available");
   const params: Record<string, unknown> = { prompt };
   if (refs.length && m.endpoint === "multi_reference") params.images = refs;
-  else if (refs.length && m.endpoint === "edit") params.image = refs[0];
+  else if (refs.length && m.endpoint === "edit") {
+    // Qwen documents 1-3 references as its optimal range, so don't hand it a
+    // fourth. flux2-dev's edit keeps only the first — that lane loses the rest.
+    if (LIST_EDIT.test(m.model)) params.images = refs.slice(0, 3);
+    else params.image = refs[0];
+  }
   return runJob(ps, m, params);
 }
 

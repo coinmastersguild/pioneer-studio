@@ -90,6 +90,25 @@ test("mage-flow wins generation and edit even when flux2-dev's notes say 'image'
   expect(pickModel(fluxOnly, "image_edit")?.model).toBe("flux2-dev");
 });
 
+test("reference renders go to qwen, never to the mage edit that blanks on 2+ refs", () => {
+  // the live notes verbatim — mage's names qwen, and qwen's model id ends in
+  // "image", so a note-matching or unanchored picker lands on the wrong model
+  const models = [
+    { model: "flux2-dev", endpoint: "multi_reference", credits: 75, note: "1-4 reference images" },
+    {
+      model: "mage-flow-edit",
+      endpoint: "edit",
+      credits: 25,
+      note: "Mage-Flow-Edit-Turbo instruction-based edit. NOTE: ≥2 images plus a long descriptive prompt reliably returns the content-gate's blank placeholder — use qwen-image.edit for multi-reference work",
+    },
+    { model: "qwen-image", endpoint: "edit", credits: 50, note: "Qwen-Image-Edit-2509 multi-reference identity lock" },
+  ];
+  expect(pickModel(models, "image_edit")?.model).toBe("mage-flow-edit");
+  expect(pickModel(models, "image_refs")?.model).toBe("qwen-image");
+  // no qwen on the account → flux2-dev's multi_reference, still not mage
+  expect(pickModel(models.slice(0, 2), "image_refs")?.model).toBe("flux2-dev");
+});
+
 test("MediaPipe landmarks map onto the cskel27 joints the control take draws", async () => {
   const { mapLandmarks, CSKEL_BONES, boneColor, fitBox } = await import("./poseExtract");
   // a crude standing figure: shoulders at y .3, hips at y .5, feet at y .9
