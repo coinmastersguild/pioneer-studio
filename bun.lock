@@ -5,7 +5,7 @@
     "": {
       "name": "pioneer-studio",
       "dependencies": {
-        "@mediapipe/tasks-vision": "^0.10.35",
+        "@mediapipe/tasks-vision": "^1.0.0",
         "@metamask/sdk": "^0.34.0",
         "@pixiv/three-vrm": "^3.5.3",
         "react": "^19.2.7",
@@ -45,7 +45,7 @@
 
     "@ethereumjs/util": ["@ethereumjs/util@8.1.0", "", { "dependencies": { "@ethereumjs/rlp": "^4.0.1", "ethereum-cryptography": "^2.0.0", "micro-ftch": "^0.3.1" } }, "sha512-zQ0IqbdX8FZ9aw11vP+dZkKDkS+kgIvQPHnSAXzP9pLu+Rfu3D3XEeLbicvoXJTYnhZiPmsZUxgdzXwNKxRPbA=="],
 
-    "@mediapipe/tasks-vision": ["@mediapipe/tasks-vision@0.10.35", "", {}, "sha512-HOvadwVRE6JC+45nyYhmnywnr5h/J8KZvOeUNVOG9q/0875pZgItznFB9bRTvLc264YSJqiZ1NsIpCStJw/egg=="],
+    "@mediapipe/tasks-vision": ["@mediapipe/tasks-vision@1.0.0", "", {}, "sha512-D9xp3MEMArzkx4s+M7rDWCIIST7Bh0uqIImSazgX5nS05o3gfw/bT/wY6j7N6R+H6/AgvUM2lOPvAnniwdeQbg=="],
 
     "@metamask/json-rpc-engine": ["@metamask/json-rpc-engine@8.0.2", "", { "dependencies": { "@metamask/rpc-errors": "^6.2.1", "@metamask/safe-event-emitter": "^3.0.0", "@metamask/utils": "^8.3.0" } }, "sha512-IoQPmql8q7ABLruW7i4EYVHWUbF74yrp63bRuXV5Zf9BQwcn5H9Ww1eLtROYvI1bUXwOiHZ6qT5CWTrDc/t/AA=="],
 
