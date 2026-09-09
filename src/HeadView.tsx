@@ -165,6 +165,11 @@ export default function HeadView({
   useEffect(() => localStorage.setItem(DESIGN_KEY, JSON.stringify(design)), [design]);
   useEffect(() => localStorage.setItem(PERSONA_KEY, persona), [persona]);
   useEffect(() => localStorage.setItem(VOICE_KEY, voice), [voice]);
+  // Minting is ~1.7s and its result is cached, so pay it while the tab is
+  // opening rather than in front of the user's first line.
+  useEffect(() => {
+    if (active) void headVoice(ps.apiKey, voice);
+  }, [active, voice, ps.apiKey]);
 
   /* ── scene ── */
   useEffect(() => {
@@ -368,9 +373,21 @@ export default function HeadView({
       // thing would say the opening twice.
       if (sounded) throw e;
       if (isVoiceGone(e)) {
-        ref = await remintHeadVoice(ps.apiKey);
+        // The server dropped the id (its cache is in-memory, so a restart
+        // empties it). Re-mint and retry the STREAM: falling straight to the
+        // buffered route here cost a second of latency for no reason.
         setBusy("re-minting the voice…");
-      } else setBusy("streaming voice down — using the buffered route…");
+        ref = await remintHeadVoice(ps.apiKey);
+        if (signal.aborted) return;
+        try {
+          const res = await ttsStream(ps.apiKey, line, ref, signal);
+          await playPcmStream(ctx, res, wire, signal, sounding);
+          return;
+        } catch (again: any) {
+          if (signal.aborted || again?.name === "AbortError" || sounded) return;
+        }
+      }
+      setBusy("streaming voice down — using the buffered route…");
     }
     const bytes = await ttsBytes(ps.apiKey, line, ref);
     if (signal.aborted) return;
