@@ -75,7 +75,7 @@ obviously not the character; a description sounds nearly right and drifts, which
 is invisible until someone listens to a whole scene.
 
 **No new env vars.** `VOICE_UPSTREAM` derives from `TTS_UPSTREAM_URL`
-(`https://inference.pioneers.dev/tts` → `/voice`), the same way `/tts/stream`
+(the TTS upstream's sibling path), the same way `/tts/stream`
 has since July. Nothing to set in Pulumi; don't open that repo for this.
 
 ## Not done
