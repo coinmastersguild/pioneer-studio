@@ -58,23 +58,44 @@ type Turn = { id: number; who: "you" | "head"; text: string };
  *  description sounds nearly right and drifts. Loud beats subtle. */
 type MintedVoice = { design: string; voice_id: string; reference_audio: string };
 
+// The clip is ~280KB and localStorage also holds whole project pipelines, so
+// the write can fail on quota. It must never cost us the mint: drop the clip,
+// then fall back to memory. Losing the clip costs recovery from an evicted id;
+// losing the id costs the voice itself, on every line.
+let liveVoice: MintedVoice | null = null;
+
 function mintedVoice(): MintedVoice | null {
   try {
-    return JSON.parse(localStorage.getItem(VOICE_ID_KEY) || "null");
+    return JSON.parse(localStorage.getItem(VOICE_ID_KEY) || "null") || liveVoice;
   } catch {
-    return null;
+    return liveVoice;
   }
 }
 
-async function headVoice(apiKey: string, design: string): Promise<VoiceRef> {
+function rememberVoice(v: MintedVoice) {
+  liveVoice = v;
+  for (const attempt of [v, { ...v, reference_audio: "" }]) {
+    try {
+      localStorage.setItem(VOICE_ID_KEY, JSON.stringify(attempt));
+      return;
+    } catch {
+      /* quota — try again without the clip, then give up and keep it in memory */
+    }
+  }
+}
+
+async function headVoice(apiKey: string, design: string, onFail?: (why: string) => void): Promise<VoiceRef> {
   if (!design.trim()) return undefined;
   const cached = mintedVoice();
   if (cached?.voice_id && cached.design === design) return { voice_id: cached.voice_id };
   try {
     const minted = await mintVoice(apiKey, { voice_description: design });
-    localStorage.setItem(VOICE_ID_KEY, JSON.stringify({ design, ...minted }));
+    rememberVoice({ design, ...minted });
     return { voice_id: minted.voice_id };
-  } catch {
+  } catch (e: any) {
+    // Silence here is what made this hard to see: the head just spoke in a
+    // different voice every turn and never said why.
+    onFail?.(String(e?.message || e));
     return undefined;
   }
 }
@@ -85,7 +106,7 @@ async function remintHeadVoice(apiKey: string): Promise<VoiceRef> {
   if (!cached?.reference_audio) return undefined;
   try {
     const minted = await mintVoice(apiKey, { reference_audio: cached.reference_audio });
-    localStorage.setItem(VOICE_ID_KEY, JSON.stringify({ ...cached, voice_id: minted.voice_id }));
+    rememberVoice({ ...cached, voice_id: minted.voice_id });
     return { voice_id: minted.voice_id };
   } catch {
     return undefined;
@@ -168,7 +189,7 @@ export default function HeadView({
   // Minting is ~1.7s and its result is cached, so pay it while the tab is
   // opening rather than in front of the user's first line.
   useEffect(() => {
-    if (active) void headVoice(ps.apiKey, voice);
+    if (active) void headVoice(ps.apiKey, voice, (why) => ps.toast(`voice not minted — the head will use a default voice (${why})`));
   }, [active, voice, ps.apiKey]);
 
   /* ── scene ── */
@@ -359,7 +380,9 @@ export default function HeadView({
       soundingRef.current = true;
       setBusy("speaking…");
     };
-    let ref = await headVoice(ps.apiKey, voiceRef.current);
+    let ref = await headVoice(ps.apiKey, voiceRef.current, (why) =>
+      ps.toast(`voice not minted — the head will use a default voice (${why})`),
+    );
     if (signal.aborted) return;
     try {
       const res = await ttsStream(ps.apiKey, line, ref, signal);
