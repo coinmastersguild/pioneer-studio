@@ -59,4 +59,30 @@ table.files tbody tr:hover td{ background:var(--bg-hover); }
 .ml-body{ padding:14px; overflow:auto; display:grid; place-items:center; }
 .ml-body img, .ml-body video{ max-width:100%; max-height:66vh; border-radius:var(--radius-md); display:block; }
 .ml-none{ color:var(--fg3); font-size:12.5px; padding:40px; }
+.model-preview{ width:min(760px,80vw); min-height:320px; display:grid; place-items:center; border-radius:var(--radius-md); overflow:hidden; background:radial-gradient(circle at 50% 42%,rgba(74,222,128,.08),rgba(4,10,7,.4)); }
+.model-preview canvas{ max-width:100%; height:auto; display:block; }
+.model-preview[data-error]::after{ content:attr(data-error); color:var(--fg3); font-size:12px; padding:30px; }
 .ml-foot{ display:flex; gap:8px; padding:11px 14px; border-top:1px solid var(--border); }
+.catalog-warning{ max-width:1100px; margin-bottom:16px; padding:10px 12px; border:1px solid rgba(251,191,36,.35); border-radius:var(--radius-md); color:var(--compass-400); background:var(--warn-subtle); font-size:12px; }
+.model-lane{ max-width:1100px; margin-bottom:22px; }
+.model-lane-head{ display:flex; align-items:baseline; gap:10px; margin-bottom:8px; }
+.model-lane-head h3{ margin:0; font-size:14px; }
+.model-lane-head>span:not(.mf){ color:var(--fg3); font-size:11.5px; }
+.model-lane-head .mf{ margin-left:auto; pointer-events:none; }
+.model-default{ margin-left:8px; pointer-events:none; font-size:10px; }
+.model-note{ color:var(--fg3); font-size:11.5px; max-width:420px; }
+.job-card{ width:min(720px,92vw); }
+.job-fields{ padding:16px; overflow:auto; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:13px; }
+.job-field{ display:flex; flex-direction:column; gap:5px; min-width:0; }
+.job-field label{ color:var(--fg2); font:600 11px var(--mono); }
+.job-field input,.job-field select,.job-field textarea{ width:100%; box-sizing:border-box; border:1px solid var(--border); border-radius:6px; background:var(--bg-elevated); color:var(--fg1); padding:7px 8px; font:12px var(--font-body); }
+.job-field textarea{ min-height:58px; resize:vertical; }
+.job-field select[multiple]{ min-height:82px; }
+.job-field small{ color:var(--fg4); font-size:10px; }
+.job-field .job-error{ color:#fca5a5; }
+.job-pricing{ grid-column:1/-1; color:var(--fg3); font-size:11px; padding:8px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-elevated); }
+.job-check{ flex-direction:row; align-items:center; }
+.job-check input{ width:auto; }
+.job-foot{ align-items:center; }
+.job-foot>span{ color:var(--fg3); font-size:11px; max-width:360px; }
+@media(max-width:700px){ .job-fields{ grid-template-columns:1fr; } }

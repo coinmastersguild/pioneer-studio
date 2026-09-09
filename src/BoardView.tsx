@@ -6,14 +6,25 @@ import { fmtTime, kindOf, PH, type PS } from "./shared";
 import BeatDialog from "./BeatDialog";
 import AssetsPanel from "./AssetsPanel";
 import {
+  assignBeatCast,
+  BEAT_SECONDS,
+  assignBeatGeography,
+  assignBeatLocation,
   beatRefs,
   buildPreviewCut,
   extOf,
   loadPipeline,
   markBeatEdited,
+  newId,
   savePipeline,
+  setWorldLayout,
+  upsertCharacter,
+  upsertLocation,
+  worldLayoutOf,
   type Pipeline,
   type PreviewItem,
+  type BeatMovement,
+  type ScreenDirection,
 } from "./pipeline";
 import { boardReadiness } from "./readiness";
 import { promptPackMarkdown, shotBible, downloadText } from "./promptPack";
@@ -56,18 +67,20 @@ export default function BoardView({ ps }: { ps: PS }) {
     if (ps.mode === "board" || ps.board?.id) setPipe(loadPipeline(ps.board?.id || "default"));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ps.mode, ps.board?.id]);
-  const mut = (fn: (p: Pipeline) => void) =>
-    setPipe(() => {
-      // clone the STORED doc, not this view's state — a stale clone here would
-      // silently clobber pipeline writes made from other views (lost update)
-      const id = psRef.current.board?.id || "default";
-      const next = loadPipeline(id);
-      fn(next);
-      savePipeline(id, next);
-      return next;
-    });
   const psRef = useRef(ps);
   psRef.current = ps;
+  const applyPipelineMutation = (fn: (p: Pipeline) => void): Pipeline => {
+    // clone the STORED doc, not this view's state — a stale clone here would
+    // silently clobber pipeline writes made from other views (lost update)
+    const id = psRef.current.board?.id || "default";
+    const next = loadPipeline(id);
+    fn(next);
+    savePipeline(id, next);
+    pipeRef.current = next;
+    setPipe(next);
+    return next;
+  };
+  const mut = (fn: (p: Pipeline) => void) => void applyPipelineMutation(fn);
 
   const shots = ps.board?.shots || [];
 
@@ -235,11 +248,302 @@ export default function BoardView({ ps }: { ps: PS }) {
           const list = p.board?.shots || [];
           return {
             readiness: boardReadiness(list, pl),
-            beats: list.map((s, i) => ({ index: i + 1, id: s.id, text: s.prompt, status: s.status, hasFinal: !!extOf(pl, s.id).finalClip })),
+            world: worldLayoutOf(pl),
+            cast: pl.characters.map((c) => ({ id: c.id, name: c.name, approved: c.approved, hasImage: !!c.image, imageUrl: c.image?.url || null })),
+            locations: (pl.locations || []).map((location) => ({
+              id: location.id,
+              name: location.name,
+              kind: location.kind || "zone",
+              approved: location.approved,
+              sourceBeatId: location.sourceBeatId || null,
+              mapX: location.mapX ?? 50,
+              mapY: location.mapY ?? 50,
+              adjacentTo: location.adjacentTo || [],
+              allowedElements: location.allowedElements || [],
+              forbiddenElements: location.forbiddenElements || [],
+              hasImage: !!location.image,
+              imageUrl: location.image?.url || null,
+            })),
+            beats: list.map((s, i) => ({
+              index: i + 1,
+              id: s.id,
+              text: s.prompt,
+              status: s.status,
+              characterIds: extOf(pl, s.id).characterIds,
+              castIntentionalEmpty: !!extOf(pl, s.id).castIntentionalEmpty,
+              locationId: extOf(pl, s.id).locationId || null,
+              location: (pl.locations || []).find((location) => location.id === extOf(pl, s.id).locationId)?.name || null,
+              geography: extOf(pl, s.id).geography || null,
+              audioCues: extOf(pl, s.id).audioCues || [],
+              cast: extOf(pl, s.id).characterIds.map((id) => pl.characters.find((c) => c.id === id)?.name || id),
+              hasFinal: !!extOf(pl, s.id).finalClip,
+            })),
+          };
+        },
+      },
+      {
+        name: "board.set_world_layout",
+        description: "Set the canonical world map, continuity rules, and forbidden inventions; saves without rendering",
+        parameters: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            description: { type: "string" },
+            approved: { type: "boolean" },
+            map_url: { type: "string", description: "Public bird's-eye master-map URL" },
+            map_content_type: { type: "string" },
+            rules: { type: "array", items: { type: "string" } },
+            forbidden_elements: { type: "array", items: { type: "string" } },
+          },
+          required: ["name", "description", "rules", "forbidden_elements"],
+          additionalProperties: false,
+        },
+        run: (params) => {
+          let saved = null;
+          applyPipelineMutation((pl) => {
+            saved = setWorldLayout(pl, {
+              name: String(params?.name || ""),
+              description: String(params?.description || ""),
+              approved: params?.approved === true,
+              map: params?.map_url ? { url: String(params.map_url), content_type: String(params?.map_content_type || "image/png") } : null,
+              rules: Array.isArray(params?.rules) ? params.rules.map(String) : [],
+              forbiddenElements: Array.isArray(params?.forbidden_elements) ? params.forbidden_elements.map(String) : [],
+            });
+          });
+          return { ok: true, world: saved };
+        },
+      },
+      {
+        name: "board.upsert_location",
+        description: "Create or replace one location-registry plate by stable id; saves without rendering",
+        parameters: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "Stable location id; retries with the same id replace instead of duplicate" },
+            name: { type: "string" },
+            description: { type: "string" },
+            approved: { type: "boolean" },
+            prompt: { type: "string", description: "Optional production-design instruction for reference-driven renders" },
+            image_url: { type: "string", description: "Public beat-derived location plate URL" },
+            image_content_type: { type: "string" },
+            source_beat_id: { type: "string", description: "Explicit correct/on-theme beat used to derive the plate" },
+            kind: { type: "string", enum: ["zone", "transition"] },
+            map_x: { type: "number", minimum: 0, maximum: 100 },
+            map_y: { type: "number", minimum: 0, maximum: 100 },
+            adjacent_to: { type: "array", items: { type: "string" } },
+            allowed_elements: { type: "array", items: { type: "string" } },
+            forbidden_elements: { type: "array", items: { type: "string" } },
+          },
+          required: ["id", "name"],
+          additionalProperties: false,
+        },
+        run: (params) => {
+          let saved = null;
+          const next = applyPipelineMutation((pl) => {
+            saved = upsertLocation(pl, {
+              id: String(params?.id || ""),
+              name: String(params?.name || ""),
+              description: String(params?.description || ""),
+              approved: params?.approved !== false,
+              prompt: String(params?.prompt || ""),
+              image: params?.image_url ? {
+                url: String(params.image_url),
+                content_type: String(params?.image_content_type || "image/png"),
+              } : null,
+              sourceBeatId: String(params?.source_beat_id || "") || undefined,
+              kind: params?.kind === "transition" ? "transition" : "zone",
+              mapX: Number(params?.map_x ?? 50),
+              mapY: Number(params?.map_y ?? 50),
+              adjacentTo: Array.isArray(params?.adjacent_to) ? params.adjacent_to.map(String) : [],
+              allowedElements: Array.isArray(params?.allowed_elements) ? params.allowed_elements.map(String) : [],
+              forbiddenElements: Array.isArray(params?.forbidden_elements) ? params.forbidden_elements.map(String) : [],
+            });
+          });
+          return { ok: true, location: saved, locationCount: (next.locations || []).length };
+        },
+      },
+      {
+        name: "board.assign_location",
+        description: "Assign one location to an existing beat; route planning is a separate required step",
+        parameters: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "Beat id from board.get_state" },
+            location_id: { type: "string", description: "Stable id from the location registry" },
+          },
+          required: ["id", "location_id"],
+          additionalProperties: false,
+        },
+        run: (params) => {
+          const p = psRef.current;
+          const id = String(params?.id || "");
+          if (!(p.board?.shots || []).some((shot) => shot.id === id)) throw new Error(`no beat ${id}`);
+          const next = applyPipelineMutation((pl) => assignBeatLocation(pl, id, String(params?.location_id || "")));
+          return { ok: true, id, locationId: extOf(next, id).locationId };
+        },
+      },
+      {
+        name: "board.plan_beat_geography",
+        description: "Lock a beat to one canonical location, adjacent entry/exit, movement type, screen direction, and landmark anchor",
+        parameters: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "Beat id from board.get_state" },
+            location_id: { type: "string" },
+            movement: { type: "string", enum: ["hold", "enter", "cross", "exit", "arrive"] },
+            screen_direction: { type: "string", enum: ["left-to-right", "right-to-left", "toward-camera", "away-camera", "hold"] },
+            entry_from_id: { type: "string" },
+            exit_to_id: { type: "string" },
+            anchor: { type: "string" },
+          },
+          required: ["id", "location_id", "movement", "screen_direction"],
+          additionalProperties: false,
+        },
+        run: (params) => {
+          const p = psRef.current;
+          const id = String(params?.id || "");
+          if (!(p.board?.shots || []).some((shot) => shot.id === id)) throw new Error(`no beat ${id}`);
+          const next = applyPipelineMutation((pl) => assignBeatGeography(pl, id, {
+            locationId: String(params?.location_id || ""),
+            movement: params?.movement as BeatMovement,
+            screenDirection: params?.screen_direction as ScreenDirection,
+            entryFromId: String(params?.entry_from_id || "") || undefined,
+            exitToId: String(params?.exit_to_id || "") || undefined,
+            anchor: String(params?.anchor || "") || undefined,
+          }));
+          return { ok: true, id, locationId: extOf(next, id).locationId, geography: extOf(next, id).geography };
+        },
+      },
+      {
+        name: "board.upsert_character",
+        description: "Create or replace one cast-registry character by stable id; saves without rendering",
+        parameters: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "Stable character id; retries with the same id replace instead of duplicate" },
+            name: { type: "string" },
+            description: { type: "string" },
+            approved: { type: "boolean" },
+            prompt: { type: "string", description: "Optional identity/style instruction for reference-driven renders" },
+            image_url: { type: "string", description: "Public driving-image URL" },
+            image_content_type: { type: "string" },
+          },
+          required: ["id", "name", "image_url"],
+          additionalProperties: false,
+        },
+        run: (params) => {
+          let saved = null;
+          const next = applyPipelineMutation((pl) => {
+            saved = upsertCharacter(pl, {
+              id: String(params?.id || ""),
+              name: String(params?.name || ""),
+              description: String(params?.description || ""),
+              approved: params?.approved !== false,
+              prompt: String(params?.prompt || ""),
+              image: {
+                url: String(params?.image_url || ""),
+                content_type: String(params?.image_content_type || "image/png"),
+              },
+            });
+          });
+          return { ok: true, character: saved, castSize: next.characters.length };
+        },
+      },
+      {
+        name: "board.assign_cast",
+        description: "Replace the cast assignment for one existing beat; saves without rendering",
+        parameters: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "Beat id from board.get_state" },
+            character_ids: { type: "array", items: { type: "string" }, description: "Stable ids from the cast registry" },
+            intentional_empty: { type: "boolean", description: "Resolve a shot with deliberately no visible cast and no identity references" },
+          },
+          required: ["id", "character_ids"],
+          additionalProperties: false,
+        },
+        run: (params) => {
+          const p = psRef.current;
+          const id = String(params?.id || "");
+          if (!(p.board?.shots || []).some((shot) => shot.id === id)) throw new Error(`no beat ${id}`);
+          const ids = Array.isArray(params?.character_ids) ? params.character_ids.map(String) : [];
+          const next = applyPipelineMutation((pl) => assignBeatCast(pl, id, ids, params?.intentional_empty === true));
+          return {
+            ok: true,
+            id,
+            characterIds: extOf(next, id).characterIds,
+            readiness: boardReadiness(p.board?.shots || [], next),
           };
         },
       },
       { name: "board.add_beat", description: "Add a new beat (opens its dialog)", run: () => fnsRef.current.onAddBeat() },
+      {
+        // Motion direction was the single biggest gap in the v6 pass: no tracers
+        // on any beat, so the video model was told what a shot looked like but
+        // never what moved, and answered with frozen tableaus. Drawing them by
+        // hand is 20 beats of mouse work; this is the same write the editor makes.
+        name: "board.set_beat_tracers",
+        description:
+          "Replace a beat's motion tracers — the blocking that tells the video model what moves. " +
+          "Params: { id, tracers: [{ characterId?, points: [{t,x,y}] }] }. t is 0-10s, x/y are 0-1 " +
+          "screen fractions. Speech tracers on the beat are preserved.",
+        parameters: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "Beat id from board.get_state" },
+            tracers: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  characterId: { type: "string", description: "Character id, or omit for a camera/object path" },
+                  points: {
+                    type: "array",
+                    minItems: 2,
+                    items: {
+                      type: "object",
+                      properties: { t: { type: "number" }, x: { type: "number" }, y: { type: "number" } },
+                      required: ["t", "x", "y"],
+                    },
+                  },
+                },
+                required: ["points"],
+              },
+            },
+          },
+          required: ["id", "tracers"],
+          additionalProperties: false,
+        },
+        run: (params) => {
+          const id = String(params?.id || "");
+          const incoming = Array.isArray(params?.tracers) ? (params.tracers as Record<string, unknown>[]) : [];
+          if (!incoming.length) throw new Error("pass at least one tracer with 2+ points");
+          const next = applyPipelineMutation((pl) => {
+            const ext = extOf(pl, id);
+            const speech = ext.tracers.filter((t) => t.kind === "speech");
+            ext.tracers = [
+              ...speech,
+              ...incoming.map((t) => {
+                const points = (t.points as { t: number; x: number; y: number }[]) || [];
+                if (points.length < 2) throw new Error("a motion tracer needs at least 2 points");
+                return {
+                  id: newId(),
+                  characterId: t.characterId ? String(t.characterId) : null,
+                  kind: "move" as const,
+                  path: points.map((p) => ({
+                    t: Math.max(0, Math.min(BEAT_SECONDS, Number(p.t) || 0)),
+                    x: Math.max(0, Math.min(1, Number(p.x) || 0)),
+                    y: Math.max(0, Math.min(1, Number(p.y) || 0)),
+                  })),
+                };
+              }),
+            ];
+            markBeatEdited(pl, id);
+            pl.beats[id] = ext;
+          });
+          return { ok: true, id, tracers: extOf(next, id).tracers.length, readiness: boardReadiness(psRef.current.board?.shots || [], next) };
+        },
+      },
       {
         name: "board.set_beat_text",
         description: "Set a beat's text. Saves only — call board.render_beat to make a picture. Params: { id, text }",
@@ -277,7 +581,7 @@ export default function BoardView({ ps }: { ps: PS }) {
             p,
             shot,
             shot.result
-              ? { editFrom: shot.result.url }
+              ? { editFrom: shot.result.url, refs: beatRefs(pipeRef.current, extOf(pipeRef.current, id)) }
               : { refs: beatRefs(pipeRef.current, extOf(pipeRef.current, id)) },
           );
           return { ok: true };

@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import * as THREE from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { uploadMedia, type MediaObject } from "./api";
 import { sendToChat } from "./chatHandoff";
+import { openJobForm } from "./jobHandoff";
+import { sendPropToStage } from "./stageHandoff";
+import { makeGltfLoader } from "./props";
 import { fmtBytes, GB, IcCopy, IcModels, IcMusic, kindOf, relTime, type PS } from "./shared";
 
 type Filter = "all" | "reference" | "result" | "clip" | "model" | "release";
@@ -33,9 +38,65 @@ function CopyBtn({ url, toast }: { url: string; toast: (m: string, k?: "ok" | "g
   );
 }
 
+function ModelPreview({ url }: { url: string }) {
+  const host = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = host.current;
+    if (!el) return;
+    const width = Math.min(760, Math.max(320, el.clientWidth || 640));
+    const height = Math.min(520, Math.round(width * 0.62));
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(width, height);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    el.appendChild(renderer.domElement);
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(40, width / height, 0.01, 1000);
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x26352b, 2.4));
+    const key = new THREE.DirectionalLight(0xffffff, 2.2);
+    key.position.set(3, 5, 4);
+    scene.add(key);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    let frame = 0;
+    let disposed = false;
+    makeGltfLoader(renderer).loadAsync(url).then((gltf) => {
+      if (disposed) return;
+      const model = gltf.scene || gltf.scenes[0];
+      scene.add(model);
+      const box = new THREE.Box3().setFromObject(model);
+      const center = box.getCenter(new THREE.Vector3());
+      const radius = Math.max(0.5, box.getSize(new THREE.Vector3()).length() * 0.6);
+      model.position.sub(center);
+      camera.position.set(radius, radius * 0.65, radius);
+      camera.near = Math.max(0.01, radius / 100);
+      camera.far = radius * 20;
+      camera.updateProjectionMatrix();
+      controls.target.set(0, 0, 0);
+      controls.update();
+    }).catch(() => {
+      if (el) el.dataset.error = "Could not preview this model; Download and Add to Stage remain available.";
+    });
+    const draw = () => {
+      controls.update();
+      renderer.render(scene, camera);
+      frame = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => {
+      disposed = true;
+      cancelAnimationFrame(frame);
+      controls.dispose();
+      renderer.dispose();
+      renderer.domElement.remove();
+    };
+  }, [url]);
+  return <div className="model-preview" ref={host} />;
+}
+
 /** Full-size look at one object. Images and video get played at size; anything
  *  else falls back to its name and URL, which is all there is to show. */
-function Preview({ o, onClose, toast }: { o: MediaObject; onClose(): void; toast: PS["toast"] }) {
+function Preview({ o, onClose, toast, addToStage }: { o: MediaObject; onClose(): void; toast: PS["toast"]; addToStage(): void }) {
   const kind = kindOf(o.content_type, o.url);
   useEffect(() => {
     const esc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -58,13 +119,15 @@ function Preview({ o, onClose, toast }: { o: MediaObject; onClose(): void; toast
           {kind === "image" && <img src={o.url} alt={o.name} />}
           {kind === "video" && <video src={o.url} controls autoPlay loop />}
           {kind === "audio" && <audio src={o.url} controls autoPlay />}
-          {kind === "model" && <div className="ml-none">VRM · 3D character — open it in Create to view</div>}
+          {kind === "model" && <ModelPreview url={o.url} />}
         </div>
         <div className="ml-foot">
           <CopyBtn url={o.url} toast={toast} />
           <a className="mini-btn" href={o.url} target="_blank" rel="noreferrer">
             Open original
           </a>
+          <a className="mini-btn" href={o.url} download={o.name}>Download</a>
+          {kind === "model" && <button type="button" className="mini-btn" onClick={addToStage}>Add to Stage</button>}
         </div>
       </div>
     </div>
@@ -112,6 +175,17 @@ export default function MediaView({ ps }: { ps: PS }) {
       }
     }
     p.refreshMedia();
+  }
+
+  function createFromMedia(o: MediaObject, capability: "3d" | "video_restore") {
+    openJobForm({ capability, mediaKey: o.key });
+    ps.setMode("models");
+  }
+
+  function addModelToStage(o: MediaObject) {
+    if (!/^https?:\/\//i.test(o.url)) return ps.toast("Add to Stage needs a persisted Media URL; download is available for this session result");
+    sendPropToStage({ name: o.name, url: o.url });
+    ps.setMode("animate");
   }
 
   const objects = ps.media?.objects || [];
@@ -235,6 +309,12 @@ export default function MediaView({ ps }: { ps: PS }) {
                       >
                         Open in chat
                       </button>
+                      {kind === "image" && <button type="button" className="mini-btn" onClick={() => createFromMedia(o, "3d")}>Create 3D asset</button>}
+                      {kind === "video" && <button type="button" className="mini-btn" onClick={() => createFromMedia(o, "video_restore")}>Restore / upscale</button>}
+                      {kind === "model" && <>
+                        <a className="mini-btn" href={o.url} download={o.name}>Download</a>
+                        <button type="button" className="mini-btn" onClick={() => addModelToStage(o)}>Add to Stage</button>
+                      </>}
                       <CopyBtn url={o.url} toast={ps.toast} />
                     </div>
                   </td>
@@ -244,12 +324,12 @@ export default function MediaView({ ps }: { ps: PS }) {
           </tbody>
         </table>
       )}
-      {preview && <Preview o={preview} onClose={() => setPreview(null)} toast={ps.toast} />}
+      {preview && <Preview o={preview} onClose={() => setPreview(null)} toast={ps.toast} addToStage={() => addModelToStage(preview)} />}
       <input
         ref={fileInput}
         type="file"
         multiple
-        accept="image/png,image/jpeg,image/webp,video/*,audio/*"
+        accept="image/png,image/jpeg,image/webp,video/*,audio/*,.glb,.gltf,model/gltf-binary,model/gltf+json"
         style={{ display: "none" }}
         onChange={(e) => {
           if (e.target.files?.length) onUpload(e.target.files);

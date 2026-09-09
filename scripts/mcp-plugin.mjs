@@ -6,7 +6,14 @@
 //
 // Dev server only. `vite build` never sees it, so nothing is exposed in prod.
 const PROTOCOL_VERSION = "2024-11-05";
-const CALL_TIMEOUT_MS = 30_000;
+// Listing is a synchronous read of the registry, so a page that has not answered
+// in a few seconds is not going to. Running an action is a different animal: a
+// bulk pass is one chat completion per beat and a final clip is minutes of GPU
+// (minimax-h3 is ~13.5 min for 5s). The old single 30s budget silently abandoned
+// every one of those while the page kept working — the caller saw a timeout and
+// could not tell it from a failure, and re-running would double-charge.
+const LIST_TIMEOUT_MS = 30_000;
+const CALL_TIMEOUT_MS = 45 * 60_000;
 
 export function studioMcp() {
   /** id → {resolve, reject, timer} for calls awaiting the page's reply */
@@ -15,17 +22,26 @@ export function studioMcp() {
   let sendToPage = null;
   let tabCount = () => 0;
 
-  const ask = (kind, payload) =>
+  const ask = (kind, payload, timeoutMs = CALL_TIMEOUT_MS) =>
     new Promise((resolve, reject) => {
       // failing fast on "nobody is listening" beats waiting out the timeout for
       // an answer that was never coming
       if (!sendToPage || tabCount() === 0)
         return reject(new Error("no studio tab is connected — open http://localhost:5173/ in a browser first"));
+      // The send below is a broadcast — every connected tab runs the
+      // action and only the first reply is kept. With two tabs open, reads come
+      // from whichever document answered fastest and writes land in BOTH, so a
+      // paid render fires once per tab. Refusing beats guessing; addressing a
+      // specific tab is the real fix if anyone ever needs concurrent tabs.
+      if (tabCount() > 1)
+        return reject(
+          new Error(`${tabCount()} studio tabs are connected — close all but one. Tool calls broadcast to every tab, so reads are non-deterministic and writes would apply more than once.`),
+        );
       const id = nextId++;
       const timer = setTimeout(() => {
         pending.delete(id);
-        reject(new Error(`the page did not answer in ${CALL_TIMEOUT_MS / 1000}s`));
-      }, CALL_TIMEOUT_MS);
+        reject(new Error(`the page did not answer in ${Math.round(timeoutMs / 1000)}s — it may still be working; re-read state before retrying`));
+      }, timeoutMs);
       pending.set(id, { resolve, reject, timer });
       sendToPage(kind, { id, ...payload });
     });
@@ -82,7 +98,7 @@ export function studioMcp() {
             });
           if (method === "ping") return ok({});
           if (method === "tools/list") {
-            const actions = await ask("studio:list", {});
+            const actions = await ask("studio:list", {}, LIST_TIMEOUT_MS);
             return ok({
               tools: actions.map((a) => ({
                 name: a.name.replace(/[^a-zA-Z0-9_-]/g, "_"),

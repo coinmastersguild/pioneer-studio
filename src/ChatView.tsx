@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { submitJob, uploadMedia, type ChatMessage, type MediaObject } from "./api";
-import { boardBrief, critiqueResult, injectRefs, proposeContract, requestJobPlan } from "./copilot";
+import { JobTerminalError, uploadMedia, type ChatMessage, type MediaObject } from "./api";
+import { boardBrief, critiqueResult, proposeContract, requestJobPlan } from "./copilot";
 import LoopCard from "./LoopCard";
 import type { Contract } from "./workLoop";
 import { loadPipeline } from "./pipeline";
@@ -8,6 +8,9 @@ import { consumeChatMedia } from "./chatHandoff";
 import FlowCard from "./FlowCard";
 import SkeletonCard from "./SkeletonCard";
 import { FLOWS, flowById, flowIsLive, matchFlow, wantsSkeleton, type Flow } from "./flows";
+import { clearPendingJob, loadPendingJobs, resumePendingJob } from "./pendingJobs";
+import { ChatRunTracker, type ChatRunStage } from "./chatActivity";
+import { prepareGenerationJob, runGenerationJob } from "./generationJob";
 import { IcCopy, IcImage, IcMusic, IcPlay, IcSend, IcSpark, kindOf, sleep, type PS } from "./shared";
 
 type PlanInfo = {
@@ -35,6 +38,11 @@ type Part =
   | { id: number; type: "fix"; intent: string; url: string; notes: string; fix: string; applied: boolean }
   | { id: number; type: "loop"; contract: Contract; job: { model: string; endpoint: string; params: Record<string, unknown> } | null };
 type Turn = { id: number; who: "user" | "ai"; parts: Part[] };
+// Bare-identifier cast aliases: generic type arguments in expression position
+// (as Omit<Part, "id">) are misread as JSX tags in .tsx files, so the casts
+// below use these instead.
+type NewPart = Omit<Part, "id">;
+type PartPatch = Partial<Part>;
 
 // mirrors copilot injectRefs — only these refs actually reach the job params
 function injectedRefs(endpoint: string, refs: MediaObject[]): MediaObject[] {
@@ -47,6 +55,11 @@ function injectedRefs(endpoint: string, refs: MediaObject[]): MediaObject[] {
   if (endpoint === "enhance") return [...vids.slice(0, 1), ...imgs.slice(0, 1)];
   return [];
 }
+
+// Jobs already picked up for resume this session — StrictMode double-mounts
+// the effect that walks pending jobs, so a module-level guard (not a ref)
+// keeps a job from being resumed twice.
+const resumed = new Set<string>();
 
 const STARTERS: { key: string; title: string; desc: string; icon: () => React.ReactNode; prompt: string }[] = [
   {
@@ -101,6 +114,7 @@ export default function ChatView({ ps }: { ps: PS }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [text, setText] = useState("");
   const [dropping, setDropping] = useState(false);
+  const [activeRunCount, setActiveRunCount] = useState(0);
   const scroll = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -108,13 +122,74 @@ export default function ChatView({ ps }: { ps: PS }) {
   // the interview so far — the copilot keeps asking until it has enough, so it
   // has to see what it already asked and what was answered
   const historyRef = useRef<ChatMessage[]>([]);
+  const runTracker = useRef(new ChatRunTracker());
   const psRef = useRef(ps);
   psRef.current = ps;
+
+  function reportRun(activity: ReturnType<ChatRunTracker["snapshot"]>) {
+    setActiveRunCount(activity.count);
+    psRef.current.setAiState(activity.label, activity.working);
+  }
+
+  function startRun(id: string) {
+    reportRun(runTracker.current.start(id));
+  }
+
+  function setRunStage(id: string, stage: ChatRunStage) {
+    reportRun(runTracker.current.setStage(id, stage));
+  }
+
+  function finishRun(id: string) {
+    reportRun(runTracker.current.finish(id));
+  }
 
   useEffect(() => {
     const el = scroll.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [turns]);
+
+  // Jobs submitted before a reload keep running server-side — the result
+  // still lands in Media. The client poll was the part that got lost, so on
+  // mount re-poll any job that was still in flight. StrictMode double-mount
+  // is guarded by the module-level set; a missing key defers the resume.
+  useEffect(() => {
+    const p = psRef.current;
+    if (!p.apiKey) return; // retry once a key exists
+    const pending = loadPendingJobs();
+    if (!pending.length) return;
+    void Promise.all(
+      pending.map(async (job) => {
+        if (resumed.has(job.id)) return; // already being resumed this session
+        resumed.add(job.id);
+        const runId = `resume:${job.id}`;
+        startRun(runId);
+        setRunStage(runId, "running");
+        const aiTurn = addTurn("ai");
+        const jobPart = addPart(aiTurn, { type: "job", job: { status: "running", model: job.model, endpoint: job.endpoint } } as NewPart);
+        try {
+          const out = await resumePendingJob(p, job);
+          if (out.ok && out.url) {
+            const kind = kindOf(out.contentType || "", out.url);
+            patchPart(aiTurn, jobPart, { job: { status: "done", model: job.model, endpoint: job.endpoint, url: out.url, kind } } as PartPatch);
+            await streamText(aiTurn, `Recovered — the job for "${job.intent}" finished while the app was closed. Its result is in Media.`);
+          }
+        } catch (e: any) {
+          const error = String(e.message || e);
+          if (e instanceof JobTerminalError) {
+            patchPart(aiTurn, jobPart, { job: { status: "failed", model: job.model, endpoint: job.endpoint, error } } as PartPatch);
+            await streamText(aiTurn, `The job for "${job.intent}" ended: ${error}`);
+            clearPendingJob(job.id);
+          } else {
+            patchPart(aiTurn, jobPart, { job: { status: "running", model: job.model, endpoint: job.endpoint, error } } as PartPatch);
+            await streamText(aiTurn, `Connection was lost while checking "${job.intent}". The job is still saved for recovery.`);
+          }
+        } finally {
+          finishRun(runId);
+        }
+      }),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ps.apiKey]);
 
   function addTurn(who: "user" | "ai", parts: Part[] = []): number {
     const id = nextId.current++;
@@ -136,11 +211,11 @@ export default function ChatView({ ps }: { ps: PS }) {
     );
   }
   async function streamText(turnId: number, full: string) {
-    const partId = addPart(turnId, { type: "text", text: "" } as Omit<Part, "id">);
+    const partId = addPart(turnId, { type: "text", text: "" } as NewPart);
     let acc = "";
     for (const w of full.split(" ")) {
       acc += (acc ? " " : "") + w;
-      patchPart(turnId, partId, { text: acc } as Partial<Part>);
+      patchPart(turnId, partId, { text: acc } as PartPatch);
       await sleep(20);
     }
   }
@@ -151,7 +226,7 @@ export default function ChatView({ ps }: { ps: PS }) {
     const aiTurn = addTurn("ai");
     await streamText(aiTurn, intro || `${flow.title}. ${flow.blurb}`);
     for (const line of flow.walkthrough) await streamText(aiTurn, line);
-    addPart(aiTurn, { type: "flow", flowId: flow.id } as Omit<Part, "id">);
+    addPart(aiTurn, { type: "flow", flowId: flow.id } as NewPart);
   }
   const openFlowRef = useRef(openFlow);
   openFlowRef.current = openFlow;
@@ -166,7 +241,7 @@ export default function ChatView({ ps }: { ps: PS }) {
     try {
       const { contract, job } = await proposeContract(p.apiKey, p.models, goal);
       await streamText(aiTurn, `Here is what I would grade this against. Change anything that is wrong, set a ceiling, then approve.`);
-      addPart(aiTurn, { type: "loop", contract, job } as Omit<Part, "id">);
+      addPart(aiTurn, { type: "loop", contract, job } as NewPart);
     } catch (e: any) {
       await streamText(aiTurn, `Could not plan that: ${String(e.message || e)}`);
     } finally {
@@ -181,7 +256,7 @@ export default function ChatView({ ps }: { ps: PS }) {
     await streamText(aiTurn, "Video → skeleton. The pose comes out of real footage instead of being authored.");
     await streamText(aiTurn, "Drop a clip with one person in frame and pick the five seconds worth keeping.");
     await streamText(aiTurn, "It runs in your browser, so it costs nothing, and the take lands in your media store ready to drive a render.");
-    addPart(aiTurn, { type: "skeleton" } as Omit<Part, "id">);
+    addPart(aiTurn, { type: "skeleton" } as NewPart);
   }
   const openSkeletonRef = useRef(openSkeleton);
   openSkeletonRef.current = openSkeleton;
@@ -189,7 +264,7 @@ export default function ChatView({ ps }: { ps: PS }) {
   async function fire(input: string) {
     const p = psRef.current;
     const t = (input || "").trim();
-    if (!t || p.isBusy()) return;
+    if (!t) return;
     setText("");
     if (box.current) box.current.style.height = "auto";
     addTurn("user", [{ id: nextId.current++, type: "text", text: t }]);
@@ -211,9 +286,9 @@ export default function ChatView({ ps }: { ps: PS }) {
       await streamText(aiT, "Add your sk-pioneer key in Settings first — I can't run jobs without it.");
       return;
     }
-    p.setBusy(true);
-    p.setAiState("thinking", true);
     const aiTurn = addTurn("ai");
+    const runId = `chat:${aiTurn}`;
+    startRun(runId);
     const started = Date.now();
     let jobPart = 0;
     let jobModel = "";
@@ -231,7 +306,7 @@ export default function ChatView({ ps }: { ps: PS }) {
       // still gathering — put the question on screen and wait for the answer
       if (plan.ask) {
         historyRef.current = [...historyRef.current, { role: "assistant" as const, content: `I asked: ${plan.ask.question}` }].slice(-12);
-        addPart(aiTurn, { type: "ask", question: plan.ask.question, options: plan.ask.options, answered: null } as Omit<Part, "id">);
+        addPart(aiTurn, { type: "ask", question: plan.ask.question, options: plan.ask.options, answered: null } as NewPart);
         return;
       }
       // needs files from the user — the card collects them
@@ -239,7 +314,7 @@ export default function ChatView({ ps }: { ps: PS }) {
         if (plan.flow === "skeleton") await openSkeleton();
         else {
           const f = flowById(plan.flow);
-          if (f) addPart(aiTurn, { type: "flow", flowId: f.id } as Omit<Part, "id">);
+          if (f) addPart(aiTurn, { type: "flow", flowId: f.id } as NewPart);
         }
         return;
       }
@@ -248,11 +323,11 @@ export default function ChatView({ ps }: { ps: PS }) {
       const { model, endpoint } = plan.job;
       jobModel = model;
       jobEndpoint = endpoint;
-      const refs: MediaObject[] = plan.job.refs
-        .map((k) => mediaObjects.find((o) => o.key === k || o.name === k))
-        .filter((o): o is MediaObject => !!o);
-      const params = injectRefs(endpoint, plan.job.params, refs);
-      const cost = p.models.find((m) => m.model === model && m.endpoint === endpoint)?.credits ?? "?";
+      const request = { model, endpoint, params: plan.job.params, refs: plan.job.refs };
+      const prepared = prepareGenerationJob(p.models, p.media, request);
+      const refs = prepared.resolvedRefs;
+      const params = prepared.params;
+      const cost = prepared.entry.credits;
       const paramPairs = Object.entries(params)
         .filter(([k]) => k !== "prompt" && k !== "prompts" && k !== "lyrics")
         .map(([k, v]) => [k, Array.isArray(v) ? `${v.length}×` : String(v).slice(0, 34)] as [string, string]);
@@ -260,22 +335,20 @@ export default function ChatView({ ps }: { ps: PS }) {
       addPart(aiTurn, {
         type: "plan",
         plan: { model, endpoint, params: paramPairs, refs: injectedRefs(endpoint, refs).map((r) => r.name), cost },
-      } as Omit<Part, "id">);
+      } as NewPart);
       await sleep(500);
 
-      const res = await submitJob(p.apiKey, model, endpoint, params);
-      p.charge(res.credits_remaining);
-      jobPart = addPart(aiTurn, {
-        type: "job",
-        job: { status: "queued", model, endpoint },
-      } as Omit<Part, "id">);
-      p.setAiState("running", true);
-      runTimer = setTimeout(() => patchPart(aiTurn, jobPart, { job: { status: "running", model, endpoint } } as Partial<Part>), 3200);
-
-      const { url, contentType } = await p.waitForJob(res.job_id);
+      const { submission: res, url, contentType } = await runGenerationJob(p, request, t, () => {
+        jobPart = addPart(aiTurn, {
+          type: "job",
+          job: { status: "queued", model, endpoint },
+        } as NewPart);
+        setRunStage(runId, "running");
+        runTimer = setTimeout(() => patchPart(aiTurn, jobPart, { job: { status: "running", model, endpoint } } as PartPatch), 3200);
+      });
       clearTimeout(runTimer);
       const kind = kindOf(contentType, url);
-      patchPart(aiTurn, jobPart, { job: { status: "done", model, endpoint, url, kind } } as Partial<Part>);
+      patchPart(aiTurn, jobPart, { job: { status: "done", model, endpoint, url, kind } } as PartPatch);
       const secs = ((Date.now() - started) / 1000).toFixed(1);
       await streamText(
         aiTurn,
@@ -284,24 +357,24 @@ export default function ChatView({ ps }: { ps: PS }) {
       historyRef.current = [...historyRef.current, { role: "assistant" as const, content: `I rendered: ${t}` }].slice(-12);
       // look at what came back and say whether it is what was asked for
       if (kind === "image") {
-        p.setAiState("reviewing the result", true);
+        setRunStage(runId, "reviewing the result");
         const c = await critiqueResult(p.apiKey, t, url).catch(() => null);
         if (c) {
           await streamText(aiTurn, c.ok ? `Checked it: ${c.notes}` : `That missed something — ${c.notes}`);
-          if (c.fix) addPart(aiTurn, { type: "fix", intent: t, url, notes: c.notes, fix: c.fix, applied: false } as Omit<Part, "id">);
+          if (c.fix) addPart(aiTurn, { type: "fix", intent: t, url, notes: c.notes, fix: c.fix, applied: false } as NewPart);
         }
       }
     } catch (e: any) {
       clearTimeout(runTimer);
       const error = String(e.message || e);
-      if (jobPart)
+      if (jobPart) {
         patchPart(aiTurn, jobPart, {
           job: { status: "failed", model: jobModel, endpoint: jobEndpoint, error },
-        } as Partial<Part>);
+        } as PartPatch);
+      }
       await streamText(aiTurn, "That didn't work: " + error);
     } finally {
-      p.setAiState("idle", false);
-      p.setBusy(false);
+      finishRun(runId);
     }
   }
 
@@ -320,7 +393,7 @@ export default function ChatView({ ps }: { ps: PS }) {
       addPart(turn, {
         type: "job",
         job: { status: "done", model: "media", endpoint: handed.key.split("/")[0] || "media", url: handed.url, kind: kindOf(handed.contentType, handed.url) },
-      } as Omit<Part, "id">);
+      } as NewPart);
     setText(`Using ${handed.name}, `);
     box.current?.focus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -415,7 +488,7 @@ export default function ChatView({ ps }: { ps: PS }) {
                   if (part.type === "loop") return <LoopCard key={part.id} ps={ps} contract={part.contract} job={part.job} />;
                   if (part.type === "ask") {
                     const answer = (a: string) => {
-                      patchPart(turn.id, part.id, { answered: a } as Partial<Part>);
+                      patchPart(turn.id, part.id, { answered: a } as PartPatch);
                       // mark it as the answer to the question just asked, so the
                       // planner acts on it instead of re-opening the interview
                       void fire(`${a} — that answers your question, go ahead.`);
@@ -446,7 +519,7 @@ export default function ChatView({ ps }: { ps: PS }) {
                           className="ask-opt"
                           disabled={part.applied}
                           onClick={() => {
-                            patchPart(turn.id, part.id, { applied: true } as Partial<Part>);
+                            patchPart(turn.id, part.id, { applied: true } as PartPatch);
                             void fire(`Edit that image — ${part.fix}`);
                           }}
                         >
@@ -596,7 +669,9 @@ export default function ChatView({ ps }: { ps: PS }) {
               <svg className="ic" viewBox="0 0 24 24" style={{ width: 13, height: 13, color: "var(--accent)" }}>
                 <path d="M12 3l2.2 5.5L20 10l-5.8 1.5L12 17l-2.2-5.5L4 10l5.8-1.5z" />
               </svg>
-              Copilot picks the model &amp; settings
+              {activeRunCount
+                ? `${activeRunCount} generation${activeRunCount === 1 ? "" : "s"} in progress — keep prompting`
+                : "Copilot picks the model & settings"}
             </span>
             <span className="grow" />
             <button type="button" className="send" id="chatSend" disabled={!text.trim()} onClick={() => fire(text)}>

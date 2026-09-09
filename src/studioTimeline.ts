@@ -8,6 +8,7 @@ export type StudioTrack = {
   name: string;
   muted: boolean;
   locked: boolean;
+  volume: number;
 };
 
 export type StudioClip = {
@@ -25,6 +26,9 @@ export type StudioClip = {
   sourceDuration?: number;
   volume: number;
   muted: boolean;
+  fadeIn: number;
+  fadeOut: number;
+  linkGroupId?: string;
   edited?: boolean;
 };
 
@@ -36,7 +40,7 @@ export type StudioTimeline = {
   suppressedSourceIds: string[];
 };
 
-export type CanonicalStudioSource = Omit<StudioClip, "id" | "volume" | "muted" | "trimIn" | "trackId"> & {
+export type CanonicalStudioSource = Omit<StudioClip, "id" | "volume" | "muted" | "trimIn" | "trackId" | "fadeIn" | "fadeOut" | "linkGroupId"> & {
   canonicalId: string;
   trackId?: string;
 };
@@ -53,8 +57,8 @@ export const DEFAULT_AUDIO_TRACK_ID = "audio-1";
 
 function defaultTracks(): StudioTrack[] {
   return [
-    { id: DEFAULT_VIDEO_TRACK_ID, kind: "video", name: "Video 1", muted: false, locked: false },
-    { id: DEFAULT_AUDIO_TRACK_ID, kind: "audio", name: "Audio 1", muted: false, locked: false },
+    { id: DEFAULT_VIDEO_TRACK_ID, kind: "video", name: "Video 1", muted: false, locked: false, volume: 1 },
+    { id: DEFAULT_AUDIO_TRACK_ID, kind: "audio", name: "Audio 1", muted: false, locked: false, volume: 1 },
   ];
 }
 
@@ -84,6 +88,7 @@ export function normalizeStudioTimeline(value: unknown): StudioTimeline {
       name: typeof track.name === "string" && track.name.trim() ? track.name.trim().slice(0, 60) : `${track.kind === "audio" ? "Audio" : "Video"} ${index + 1}`,
       muted: !!track.muted,
       locked: !!track.locked,
+      volume: clamp01(finite(track.volume, 1)),
     }));
   if (!tracks.some((track) => track.kind === "video")) tracks.unshift(defaultTracks()[0]);
   if (!tracks.some((track) => track.kind === "audio")) tracks.push(defaultTracks()[1]);
@@ -92,19 +97,25 @@ export function normalizeStudioTimeline(value: unknown): StudioTimeline {
   const clips = Array.isArray(raw.clips)
     ? raw.clips
         .filter((c): c is StudioClip => !!c && typeof c.id === "string" && typeof c.sourceId === "string")
-        .map((c) => ({
-          ...c,
-          start: Math.max(0, finite(c.start, 0)),
-          duration: Math.max(MIN_CLIP_DURATION, finite(c.duration, 5)),
-          trimIn: Math.max(0, finite(c.trimIn, 0)),
-          volume: clamp01(finite(c.volume, 1)),
-          muted: !!c.muted,
-          trackId:
-            typeof c.trackId === "string" && trackIds.has(c.trackId) &&
-            tracks.find((track) => track.id === c.trackId)?.kind === trackKindForClip(c.kind)
-              ? c.trackId
-              : firstTrack(c.kind),
-        }))
+        .map((c) => {
+          const duration = Math.max(MIN_CLIP_DURATION, finite(c.duration, 5));
+          return {
+            ...c,
+            start: Math.max(0, finite(c.start, 0)),
+            duration,
+            trimIn: Math.max(0, finite(c.trimIn, 0)),
+            volume: clamp01(finite(c.volume, 1)),
+            muted: !!c.muted,
+            fadeIn: Math.max(0, Math.min(duration, finite(c.fadeIn, 0))),
+            fadeOut: Math.max(0, Math.min(duration, finite(c.fadeOut, 0))),
+            linkGroupId: typeof c.linkGroupId === "string" && c.linkGroupId ? c.linkGroupId : undefined,
+            trackId:
+              typeof c.trackId === "string" && trackIds.has(c.trackId) &&
+              tracks.find((track) => track.id === c.trackId)?.kind === trackKindForClip(c.kind)
+                ? c.trackId
+                : firstTrack(c.kind),
+          };
+        })
     : [];
   return {
     version: 2,
@@ -153,6 +164,31 @@ export function studioTimelineForPersistence(timeline: StudioTimeline): StudioTi
   return persisted;
 }
 
+/**
+ * Migrates older/free-form edits onto the no-overlap track invariant. Clips on
+ * separate tracks remain stackable; clips on the same track retain their order
+ * and are pushed just far enough to clear the preceding clip.
+ */
+export function repairTrackOverlaps(timeline: StudioTimeline): StudioTimeline {
+  const doc = normalizeStudioTimeline(timeline);
+  const next = doc.clips.map((clip) => ({ ...clip }));
+  for (const track of doc.tracks) {
+    const ordered = next
+      .map((clip, index) => ({ clip, index }))
+      .filter(({ clip }) => clip.trackId === track.id)
+      .sort((a, b) => a.clip.start - b.clip.start || a.index - b.index);
+    let cursor = 0;
+    for (const { clip } of ordered) {
+      if (clip.start < cursor) {
+        clip.start = cursor;
+        clip.edited = true;
+      }
+      cursor = clip.start + clip.duration;
+    }
+  }
+  return { ...doc, clips: next };
+}
+
 export function reconcileStudioTimeline(
   timeline: StudioTimeline,
   canonicalSources: CanonicalStudioSource[],
@@ -198,6 +234,8 @@ export function reconcileStudioTimeline(
         trimIn: 0,
         volume: 1,
         muted: false,
+        fadeIn: 0,
+        fadeOut: 0,
       });
       continue;
     }
@@ -214,7 +252,7 @@ export function reconcileStudioTimeline(
     };
   }
 
-  return { ...doc, clips: kept };
+  return repairTrackOverlaps({ ...doc, clips: kept });
 }
 
 export function studioTimelineEnd(timeline: StudioTimeline): number {
@@ -250,8 +288,60 @@ export function createStudioClip(
     sourceDuration: source.kind === "image" ? undefined : Math.max(MIN_CLIP_DURATION, duration),
     volume: 1,
     muted: false,
+    fadeIn: 0,
+    fadeOut: 0,
     edited: true,
   };
+}
+
+export function createMediaClipSet(
+  source: Pick<StudioClip, "origin" | "sourceId" | "name" | "url" | "contentType" | "kind">,
+  start: number,
+  duration: number,
+  videoTrackId = DEFAULT_VIDEO_TRACK_ID,
+  audioTrackId = DEFAULT_AUDIO_TRACK_ID,
+): StudioClip[] {
+  const primaryTrack = source.kind === "audio" ? audioTrackId : videoTrackId;
+  const primary = createStudioClip(source, start, duration, primaryTrack);
+  if (source.kind !== "video") return [primary];
+  const linkGroupId = `av-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  return [
+    { ...primary, linkGroupId, muted: true },
+    {
+      ...primary,
+      id: `${primary.id}:audio`,
+      name: `${source.name} · audio`,
+      kind: "audio",
+      trackId: audioTrackId,
+      muted: false,
+      linkGroupId,
+    },
+  ];
+}
+
+export function fadeGainAt(clip: Pick<StudioClip, "duration" | "fadeIn" | "fadeOut">, localTime: number): number {
+  const time = Math.max(0, Math.min(clip.duration, finite(localTime, 0)));
+  const fadeIn = Math.max(0, Math.min(clip.duration, finite(clip.fadeIn, 0)));
+  const fadeOut = Math.max(0, Math.min(clip.duration, finite(clip.fadeOut, 0)));
+  const inGain = fadeIn > 0 ? Math.min(1, time / fadeIn) : 1;
+  const outGain = fadeOut > 0 ? Math.min(1, (clip.duration - time) / fadeOut) : 1;
+  return Math.max(0, Math.min(inGain, outGain));
+}
+
+export function sharedInsertionStart(timeline: StudioTimeline, trackIds: string[], requestedStart: number): number {
+  const ids = new Set(trackIds);
+  let start = Math.max(0, finite(requestedStart, 0));
+  for (let pass = 0; pass <= timeline.clips.length; pass++) {
+    const containing = timeline.clips.filter(
+      (clip) =>
+        ids.has(clip.trackId) &&
+        start > clip.start + EXPORT_EPSILON &&
+        start < clip.start + clip.duration - EXPORT_EPSILON,
+    );
+    if (!containing.length) return start;
+    start = Math.max(...containing.map((clip) => clip.start + clip.duration));
+  }
+  return start;
 }
 
 export function addTrack(timeline: StudioTimeline, kind: StudioTrackKind, name?: string): StudioTimeline {
@@ -267,6 +357,7 @@ export function addTrack(timeline: StudioTimeline, kind: StudioTrackKind, name?:
     name: name?.trim() || `${kind === "audio" ? "Audio" : "Video"} ${number}`,
     muted: false,
     locked: false,
+    volume: 1,
   });
   return normalizeStudioTimeline({
     ...doc,
@@ -323,7 +414,57 @@ export function patchClip(timeline: StudioTimeline, id: string, patch: Partial<S
 }
 
 export function moveClip(timeline: StudioTimeline, id: string, start: number): StudioTimeline {
-  return patchClip(timeline, id, { start: Math.max(0, finite(start, 0)) });
+  const clip = timeline.clips.find((item) => item.id === id);
+  if (!clip || clipTrack(timeline, id)?.locked) return timeline;
+  const desired = Math.max(0, finite(start, 0));
+  const others = timeline.clips.filter((item) => item.id !== id && item.trackId === clip.trackId);
+  const overlaps = (at: number, item: StudioClip) => at < item.start + item.duration - EXPORT_EPSILON && at + clip.duration > item.start + EXPORT_EPSILON;
+  if (!others.some((item) => overlaps(desired, item))) return patchClip(timeline, id, { start: desired });
+  const candidates = [0, ...others.flatMap((item) => [item.start - clip.duration, item.start + item.duration])]
+    .map((value) => Math.max(0, value))
+    .filter((value) => !others.some((item) => overlaps(value, item)))
+    .sort((a, b) => Math.abs(a - desired) - Math.abs(b - desired));
+  return patchClip(timeline, id, { start: candidates[0] ?? clip.start });
+}
+
+function insertClipAt(timeline: StudioTimeline, clip: StudioClip, requestedStart: number): StudioTimeline {
+  const sameTrack = timeline.clips.filter((item) => item.trackId === clip.trackId);
+  const startInside = sameTrack
+    .find((item) => requestedStart > item.start + EXPORT_EPSILON && requestedStart < item.start + item.duration - EXPORT_EPSILON);
+  const start = startInside ? startInside.start + startInside.duration : Math.max(0, finite(requestedStart, 0));
+  const overlaps = sameTrack.some(
+    (item) => start < item.start + item.duration - EXPORT_EPSILON && start + clip.duration > item.start + EXPORT_EPSILON,
+  );
+  if (!overlaps)
+    return normalizeStudioTimeline({ ...timeline, clips: [...timeline.clips, { ...clip, start, edited: true }] });
+  const clips = timeline.clips.map((item) =>
+    item.trackId === clip.trackId && item.start >= start - EXPORT_EPSILON
+      ? { ...item, start: item.start + clip.duration, edited: true }
+      : item,
+  );
+  return normalizeStudioTimeline({ ...timeline, clips: [...clips, { ...clip, start, edited: true }] });
+}
+
+export function rippleMoveClip(timeline: StudioTimeline, id: string, requestedStart: number, requestedTrackId?: string): StudioTimeline {
+  const clip = timeline.clips.find((item) => item.id === id);
+  if (!clip || clipTrack(timeline, id)?.locked || !Number.isFinite(requestedStart)) return timeline;
+  const target = timeline.tracks.find((track) => track.id === (requestedTrackId || clip.trackId));
+  if (!target || target.locked || target.kind !== trackKindForClip(clip.kind)) return timeline;
+  const oldEnd = clip.start + clip.duration;
+  const without = normalizeStudioTimeline({
+    ...timeline,
+    clips: timeline.clips
+      .filter((item) => item.id !== id)
+      .map((item) =>
+        item.trackId === clip.trackId && item.start >= oldEnd - EXPORT_EPSILON
+          ? { ...item, start: Math.max(0, item.start - clip.duration), edited: true }
+          : item,
+      ),
+  });
+  const adjusted = target.id === clip.trackId && requestedStart > clip.start
+    ? Math.max(0, requestedStart - clip.duration)
+    : Math.max(0, requestedStart);
+  return insertClipAt(without, { ...clip, trackId: target.id, edited: true }, adjusted);
 }
 
 export function moveClipToTrack(timeline: StudioTimeline, id: string, trackId: string): StudioTimeline {
@@ -336,7 +477,9 @@ export function moveClipToTrack(timeline: StudioTimeline, id: string, trackId: s
     clipTrack(timeline, id)?.locked ||
     target.kind !== trackKindForClip(clip.kind)
   ) return timeline;
-  return patchClip(timeline, id, { trackId });
+  if (clip.trackId === trackId) return timeline;
+  const without = normalizeStudioTimeline({ ...timeline, clips: timeline.clips.filter((item) => item.id !== id) });
+  return insertClipAt(without, { ...clip, trackId, edited: true }, clip.start);
 }
 
 export function trimClip(
@@ -357,14 +500,17 @@ export function trimClip(
     });
   }
   const available = clip.sourceDuration == null ? Number.POSITIVE_INFINITY : clip.sourceDuration - clip.trimIn;
-  const duration = Math.max(MIN_CLIP_DURATION, Math.min(available, boundary - clip.start));
+  const nextStart = timeline.clips
+    .filter((item) => item.id !== id && item.trackId === clip.trackId && item.start >= clip.start + clip.duration - EXPORT_EPSILON)
+    .reduce((nearest, item) => Math.min(nearest, item.start), Number.POSITIVE_INFINITY);
+  const duration = Math.max(MIN_CLIP_DURATION, Math.min(available, nextStart - clip.start, boundary - clip.start));
   return patchClip(timeline, id, { duration });
 }
 
 export function addClip(timeline: StudioTimeline, clip: StudioClip): StudioTimeline {
   const track = timeline.tracks.find((item) => item.id === clip.trackId);
   if (!track || track.locked || track.kind !== trackKindForClip(clip.kind)) return timeline;
-  return normalizeStudioTimeline({ ...timeline, clips: [...timeline.clips, clip] });
+  return insertClipAt(timeline, clip, clip.start);
 }
 
 export function removeClip(timeline: StudioTimeline, id: string): StudioTimeline {
@@ -467,6 +613,8 @@ export type StudioExportPlan = {
     trimIn: number;
     volume: number;
     muted: boolean;
+    fadeIn: number;
+    fadeOut: number;
   }>;
   duration: number;
 };
@@ -509,8 +657,10 @@ export function buildStudioExportPlan(timeline: StudioTimeline): StudioExportChe
         start: clip.start,
         duration: clip.duration,
         trimIn: clip.trimIn,
-        volume: clip.volume * doc.masterVolume,
+        volume: clip.volume * (trackById.get(clip.trackId)?.volume ?? 1) * doc.masterVolume,
         muted: clip.muted || !!trackById.get(clip.trackId)?.muted || clip.kind === "image",
+        fadeIn: clip.fadeIn,
+        fadeOut: clip.fadeOut,
       })),
     },
     issues: [],

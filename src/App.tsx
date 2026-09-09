@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import "./shell.css";
 import "./chat.css";
 import "./board.css";
+import "./script.css";
 import "./studio.css";
 import "./media.css";
 import {
@@ -12,11 +13,13 @@ import {
   fetchModels,
   fetchResultUrl,
   fetchStoryboard,
+  JobTerminalError,
   openProject,
   primeMetaMaskSession,
   pollJob,
   restoreActiveProject,
   setSyncErrorHandler,
+  submitJob,
   type JobModel,
   type JobStatus,
   type ChatMessage,
@@ -33,6 +36,7 @@ import {
   IcHead,
   IcImage,
   IcModels,
+  IcScript,
   IcSend,
   IcSettings,
   IcSpark,
@@ -44,9 +48,11 @@ import {
   type Suggestion,
 } from "./shared";
 import { registerActions } from "./control";
+import { createGenerationAction } from "./generationJob";
 import { sendCharacter } from "./characterHandoff";
 import ChatView from "./ChatView";
 import BoardView from "./BoardView";
+import ScriptView from "./ScriptView";
 import StudioView from "./StudioView";
 import StageView from "./StageView";
 import CreateView from "./CreateView";
@@ -72,34 +78,27 @@ type ThreadItem = { id: number; kind: "user" | "ai"; text: string };
 type Toast = { id: number; msg: string; kind?: "ok" | "gold"; out?: boolean };
 type PendingAgentTurn = { turn: StudioAgentTurn; completed: StudioActionResult[]; actions: PreparedStudioAction[] };
 
-const MODE_LABEL: Record<Mode, string> = { chat: "chat", board: "storyboard", create: "create", animate: "animation", head: "talking head", studio: "studio", media: "media", models: "models", projects: "projects", companies: "companies", settings: "settings" };
-
-// Mirrors the breakpoint in mobile.css. Below it the copilot is an overlay
-// sheet instead of a third column, so it is reachable from every mode — but it
-// starts closed, since open it covers the work area it is meant to act on.
-const NARROW = "(max-width: 860px)";
-function useNarrow() {
-  const [narrow, setNarrow] = useState(() => window.matchMedia(NARROW).matches);
-  useEffect(() => {
-    const mq = window.matchMedia(NARROW);
-    const onChange = () => setNarrow(mq.matches);
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
-  }, []);
-  return narrow;
-}
+const MODE_LABEL: Record<Mode, string> = { chat: "chat", board: "storyboard", script: "script", create: "create", animate: "animation", head: "talking head", studio: "studio", media: "media", models: "models", projects: "projects", companies: "companies", settings: "settings" };
 
 function App() {
-  const [apiKey, setApiKey] = useState("");
+  // Dev-only credential seed. Without it an agent driving the /mcp
+  // bridge can never authenticate — every board/studio action needs a key, and
+  // the key is deliberately memory-only, so there is otherwise no path that
+  // doesn't require a human typing into Settings. `import.meta.env.DEV` is
+  // false in `vite build`, the same guard the MCP plugin itself uses, so this
+  // never reaches production and nothing is persisted.
+  const [apiKey, setApiKey] = useState(() => (import.meta.env.DEV && import.meta.env.VITE_PIONEER_API) || "");
   const [wallet, setWallet] = useState(() => localStorage.getItem("pioneer_studio_wallet") || "");
   const [mode, setMode] = useState<Mode>("chat");
   const [models, setModels] = useState<JobModel[]>([]);
+  const [catalogRevision, setCatalogRevision] = useState<string | null>(null);
+  const [catalogAvailable, setCatalogAvailable] = useState(false);
+  const [catalogLimits, setCatalogLimits] = useState<Record<string, number>>({});
   const [media, setMedia] = useState<MediaList | null>(null);
   const [board, setBoard] = useState<Storyboard | null>(null);
   const [credits, setCredits] = useState<number | null>(null);
   const [creditFlash, setCreditFlash] = useState(false);
-  const narrow = useNarrow();
-  const [copilotOpen, setCopilotOpen] = useState(() => !window.matchMedia(NARROW).matches);
+  const [copilotOpen, setCopilotOpen] = useState(false);
   const [thread, setThread] = useState<ThreadItem[]>([
     {
       id: 0,
@@ -112,6 +111,7 @@ function App() {
   const [suggestions, setSuggestions] = useState<Record<Mode, Suggestion[]>>({
     chat: [],
     board: [],
+    script: [],
     create: [],
     animate: [],
     head: [],
@@ -132,6 +132,7 @@ function App() {
   const inputHandlers = useRef<Partial<Record<Mode, (text: string) => void>>>({});
   const apiKeyRef = useRef(apiKey);
   const agentHistoryRef = useRef<ChatMessage[]>([]);
+  const catalogRefreshAt = useRef(0);
   apiKeyRef.current = apiKey;
   // Deep link: /?project=<id> opens that specific project and lands on the
   // storyboard. Wins over the localStorage restore below; kept in a ref so it
@@ -172,7 +173,7 @@ function App() {
     if (!apiKey) return;
     // debounced — the Settings key input writes here on every keystroke
     const t = setTimeout(() => {
-      fetchModels(apiKey).then((r) => setModels(r.jobs)).catch(() => {});
+      void refreshModels(true);
       refreshCredits();
       refreshMedia();
       // ?project=<id> deep link wins; else re-open the project that was active
@@ -196,6 +197,27 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiKey]);
 
+  useEffect(() => {
+    if (!apiKey) return;
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void refreshModels();
+    };
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiKey]);
+
+  useEffect(() => {
+    const stale = () => void refreshModels(true);
+    window.addEventListener("pioneer:catalog-stale", stale);
+    return () => window.removeEventListener("pioneer:catalog-stale", stale);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // project-mirror save failures surface as toasts instead of vanishing
   useEffect(() => {
     setSyncErrorHandler((msg) => toast(msg));
@@ -215,6 +237,24 @@ function App() {
         if (typeof c === "number") setCredits(c);
       })
       .catch(() => {});
+  }
+  async function refreshModels(force = false) {
+    const key = apiKeyRef.current;
+    if (!key) return;
+    const now = Date.now();
+    if (!force && now - catalogRefreshAt.current < 60_000) return;
+    catalogRefreshAt.current = now;
+    try {
+      const catalog = await fetchModels(key);
+      setModels(catalog.jobs);
+      setCatalogRevision(catalog.catalog_revision || null);
+      setCatalogLimits(catalog.limits || {});
+      setCatalogAvailable(true);
+    } catch {
+      // Already-owned jobs keep polling through waitForJob. Only new
+      // submissions are gated while discovery is unavailable.
+      setCatalogAvailable(false);
+    }
   }
   function refreshMedia() {
     if (!apiKeyRef.current) return;
@@ -255,6 +295,10 @@ function App() {
   function signOut() {
     setApiKey("");
     setWallet("");
+    setModels([]);
+    setCatalogRevision(null);
+    setCatalogAvailable(false);
+    setCatalogLimits({});
     localStorage.removeItem("pioneer_studio_wallet");
     // an open cloud project holds the old key — keep syncing and the next
     // person's edits would land in the signed-out account's project
@@ -296,7 +340,7 @@ function App() {
         refreshCredits();
         return r;
       }
-      if (s.status === "error" || s.status === "failed") throw new Error(s.error || s.status);
+      if (s.status === "error" || s.status === "failed") throw new JobTerminalError(s.error || s.status);
     }
   }
 
@@ -335,12 +379,45 @@ function App() {
           return { mode: next };
         },
       },
+      {
+        name: "app.open_project",
+        description: "Open an authorized saved project by exact id and switch to its storyboard",
+        parameters: {
+          type: "object",
+          properties: { id: { type: "string", description: "Exact project id from the projects API" } },
+          required: ["id"],
+          additionalProperties: false,
+        },
+        run: async (params) => {
+          if (!apiKey) throw new Error("Studio credential is missing");
+          const id = String(params?.id || "").trim();
+          if (!id) throw new Error("project id is required");
+          const doc = await openProject(apiKey, id);
+          setBoard(doc);
+          setMode("board");
+          return { id: doc.id, title: doc.title, rev: doc.rev, beats: doc.shots.length };
+        },
+      },
+      createGenerationAction({
+        apiKey,
+        models,
+        media,
+        charge,
+        waitForJob,
+        submit: submitJob,
+        catalogAvailable,
+        refreshCatalog: () => refreshModels(true),
+      }),
     ]);
-  }, [mode, apiKey, wallet, credits, board, models]);
+  }, [mode, apiKey, wallet, credits, board, models, media, catalogAvailable]);
 
   const ps: PS = {
     apiKey,
     models,
+    catalogRevision,
+    catalogAvailable,
+    catalogLimits,
+    refreshModels,
     media,
     refreshMedia,
     board,
@@ -453,6 +530,7 @@ function App() {
   const modeBtns: { m: Mode; label: string; icon: () => React.ReactNode }[] = [
     { m: "chat", label: "Chat", icon: IcChat },
     { m: "board", label: "Storyboard", icon: IcBoard },
+    { m: "script", label: "Script", icon: IcScript },
     { m: "create", label: "Create", icon: IcCreate },
     // Head sits before Animation: you design and cast a character (Create),
     // give it a voice and face (Head), then stage and move it (Animation).
@@ -511,7 +589,7 @@ function App() {
   }
 
   return (
-    <div className={`shell${(mode === "studio" || narrow) && copilotOpen ? "" : " copilot-collapsed"}`} id="shell">
+    <div className={`shell${copilotOpen ? "" : " copilot-collapsed"}`} id="shell">
       <a className="fork-corner" href="https://github.com/coinmastersguild/pioneer-studio/fork" target="_blank" rel="noreferrer" aria-label="Fork Pioneer Studio on GitHub">
         Fork me
       </a>
@@ -547,12 +625,12 @@ function App() {
               <b>Add key →</b>
             </button>
           )}
-          {(mode === "studio" || narrow) && (
+          {copilotOpen && (
             <button
               type="button"
-              className={`icon-btn${copilotOpen ? " on" : ""}`}
-              title="Toggle copilot"
-              onClick={() => setCopilotOpen((o) => !o)}
+              className="icon-btn on"
+              title="Hide copilot"
+              onClick={() => setCopilotOpen(false)}
             >
               <svg className="ic" viewBox="0 0 24 24"><path d="M12 3l2.2 5.5L20 10l-5.8 1.5L12 17l-2.2-5.5L4 10l5.8-1.5z" /></svg>
             </button>
@@ -599,6 +677,9 @@ function App() {
         </div>
         <div className={`view${mode === "board" ? " active" : ""}`} id="view-board">
           <BoardView ps={ps} />
+        </div>
+        <div className={`view${mode === "script" ? " active" : ""}`} id="view-script">
+          <ScriptView ps={ps} active={mode === "script"} />
         </div>
         <div className={`view${mode === "create" ? " active" : ""}`} id="view-create">
           <CreateView ps={ps} />
@@ -683,6 +764,18 @@ function App() {
           </div>
         </div>
       </div>
+
+      {!copilotOpen && (
+        <button
+          type="button"
+          className={`copilot-bubble${aiState.working ? " working" : ""}`}
+          title="Open Copilot"
+          aria-label="Open Copilot"
+          onClick={() => setCopilotOpen(true)}
+        >
+          <IcSpark />
+        </button>
+      )}
 
       {/* TOASTER */}
       <div className="toaster" id="toaster">

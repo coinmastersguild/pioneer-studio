@@ -1,8 +1,35 @@
 /** Public, metered Pioneer API. Users provide their own credential at runtime. */
 export const API_BASE = "https://alpha.pioneers.dev";
 
-export type JobModel = { model: string; endpoint: string; credits: number | string; note: string };
-export type ModelsResponse = { jobs: JobModel[]; usage: string; limits: Record<string, number> };
+export type JobParamSchema = {
+  type: "str" | "int" | "float" | "bool" | "list" | "path-or-url" | "list-of-path-or-url";
+  required?: boolean;
+  default?: unknown;
+  min?: number;
+  max?: number;
+  enum?: unknown[];
+};
+export type JobModel = {
+  model: string;
+  endpoint: string;
+  default?: boolean;
+  credits: number;
+  note: string;
+  params?: Record<string, JobParamSchema>;
+  result?: "json" | "binary";
+  result_ext?: string | null;
+  pricing?: {
+    reserved_gpu_gb: number;
+    reserved_seconds: number;
+    credits_per_gpu_gb_hour: number;
+  };
+};
+export type ModelsResponse = {
+  catalog_revision?: string;
+  jobs: JobModel[];
+  usage: string;
+  limits: Record<string, number>;
+};
 export type SubmitResponse = {
   job_id: string;
   status: string;
@@ -45,6 +72,22 @@ export type UploadResponse = {
 
 export function authHeaders(apiKey: string): Record<string, string> {
   return { Authorization: `Bearer ${apiKey}` };
+}
+
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+    this.name = "ApiError";
+  }
+}
+
+export class JobTerminalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "JobTerminalError";
+  }
 }
 
 // ── Companies & Projects ──────────────────────────────────────────────
@@ -217,7 +260,7 @@ export async function connectWallet(): Promise<{ token: string; address: string 
 
 export async function fetchModels(apiKey: string): Promise<ModelsResponse> {
   const res = await fetch(`${API_BASE}/api/v1/jobs/models`, { headers: authHeaders(apiKey) });
-  if (!res.ok) throw new Error(`models: ${res.status}`);
+  if (!res.ok) throw new ApiError(`models: ${res.status}`, res.status);
   return res.json();
 }
 
@@ -239,7 +282,10 @@ export async function submitJob(
     body: JSON.stringify({ model, endpoint, params }),
   });
   const body = await res.json();
-  if (!res.ok) throw new Error(body?.error || `submit: ${res.status}`);
+  if (!res.ok) {
+    if (res.status === 404 && typeof window !== "undefined") window.dispatchEvent(new Event("pioneer:catalog-stale"));
+    throw new ApiError(body?.error || `submit: ${res.status}`, res.status);
+  }
   return body;
 }
 
@@ -265,12 +311,18 @@ export async function fetchResultUrl(apiKey: string, jobId: string): Promise<{ u
       const type = body.content_type || (body.image.startsWith("/9j/") ? "image/jpeg" : "image/png");
       return { url: `data:${type};base64,${body.image}`, contentType: type };
     }
-    throw new Error(`result: ${res.status}`);
+    // A JSON body with no url or image is a server error (e.g. the content
+    // gate rejected the result). Surface its message instead of the opaque
+    // `result: 200`, which is what made a failed job read as "just JSON".
+    throw new Error(body?.error || `result: ${res.status}`);
   }
   if (!res.ok) throw new Error(`result: ${res.status}`);
   // no R2 on this account → raw bytes come back inline; the result URL itself
   // needs auth so it can't feed an <img>/<video> — inline it as a data: URL
   if (/^(image|video|audio)\//.test(ct)) return { url: await blobToDataUrl(await res.blob()), contentType: ct };
+  if (/^model\//.test(ct) || /(?:gltf|glb)/i.test(ct)) {
+    return { url: URL.createObjectURL(await res.blob()), contentType: ct || "model/gltf-binary" };
+  }
   return { url: res.url, contentType: ct }; // followed a redirect to R2
 }
 
@@ -331,6 +383,7 @@ export type Storyboard = {
   tracks: Track[];
   playhead: number;
   studioTimeline?: unknown;
+  pipeline?: unknown;
   createdAt: number;
   updatedAt: number;
 };
@@ -351,6 +404,42 @@ export function activeProjectId(): string | null {
 
 export function activeProjectStudioTimeline(projectId: string): unknown {
   return activeProject && (activeProject.id === projectId || sbMem?.id === projectId) ? sbMem?.studioTimeline : undefined;
+}
+
+export function activeProjectPipeline(projectId: string): unknown {
+  return activeProject && (activeProject.id === projectId || sbMem?.id === projectId) ? sbMem?.pipeline : undefined;
+}
+
+let pipelineSync: Promise<void> = Promise.resolve();
+
+export function flushActiveProjectPipeline(): Promise<void> {
+  return pipelineSync;
+}
+
+/** Mirror cast, beat assignments, tracers, and final assets into the same
+ * canonical project document as the storyboard. Local-only boards keep using
+ * pipeline.ts's localStorage fallback. */
+export function saveActiveProjectPipeline(projectId: string, pipeline: unknown): boolean {
+  if (!activeProject || !sbMem || (activeProject.id !== projectId && sbMem.id !== projectId)) return false;
+  sbMem = { ...sbMem, pipeline: structuredClone(pipeline), rev: sbMem.rev + 1, updatedAt: Date.now() };
+  const target = { ...activeProject };
+  const snapshot = structuredClone(sbMem);
+  // Serialize snapshots in authored order. Hosted project writes replace the
+  // whole document, so allowing a slow earlier request to finish last would
+  // silently roll the cast registry back to a prefix of the user's edits.
+  pipelineSync = pipelineSync.then(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/projects/${target.id}`, {
+        method: "PUT",
+        headers: { ...authHeaders(target.apiKey), "content-type": "application/json" },
+        body: JSON.stringify({ doc: snapshot, title: snapshot.title }),
+      });
+      if (!res.ok) onSyncError?.(`pipeline sync failed (${res.status}) — the local pipeline is still safe`);
+    } catch {
+      onSyncError?.("pipeline sync failed — offline? The local pipeline is still safe");
+    }
+  });
+  return true;
 }
 
 /** Mirror the cut into the same server project document as the board. Studio

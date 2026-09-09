@@ -163,3 +163,4 @@
 /* Conversation button: on = mic open, hot = the VAD is hearing you right now. */
 .hc-input .sp-btn.on { border-color: #c9a227; color: #f4e7bd; }
 .hc-input .sp-btn.hot { background: #c9a227; color: #16180f; }
+

@@ -109,6 +109,10 @@ svg.ic{ width:15px; height:15px; stroke:currentColor; stroke-width:1.5; fill:non
   border-left:1px solid var(--border); background:var(--card); min-height:0; overflow:hidden;
 }
 .shell.copilot-collapsed .copilot{ display:none; }
+.copilot-bubble{ position:fixed; z-index:145; right:20px; bottom:20px; width:46px; height:46px; padding:0; display:grid; place-items:center; border:1px solid rgba(74,222,128,.42); border-radius:50%; background:linear-gradient(145deg,var(--forest-elevated),var(--bg-elevated)); color:var(--accent); box-shadow:0 12px 32px rgba(0,0,0,.48),0 0 0 4px rgba(74,222,128,.08); cursor:pointer; transition:transform var(--duration-fast),box-shadow var(--duration-fast); }
+.copilot-bubble:hover{ transform:translateY(-2px) scale(1.04); box-shadow:0 16px 38px rgba(0,0,0,.55),0 0 0 5px rgba(74,222,128,.12); }
+.copilot-bubble svg{ width:20px; height:20px; }
+.copilot-bubble.working{ color:var(--compass-400); border-color:rgba(251,191,36,.5); animation:pulse-subtle 1.2s infinite; }
 .copilot-head{ display:flex; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid var(--border); flex-shrink:0; }
 .status-dot{ width:8px; height:8px; border-radius:50%; background:var(--accent); box-shadow:0 0 8px rgba(74,222,128,.5); flex-shrink:0; }
 .status-dot.working{ background:var(--compass-400); box-shadow:0 0 8px rgba(251,191,36,.5); animation:pulse-subtle 1.2s infinite; }
@@ -186,6 +190,7 @@ svg.ic{ width:15px; height:15px; stroke:currentColor; stroke-width:1.5; fill:non
 
 /* ─── Toasts ────────────────────────────────────────────── */
 .toaster{ position:fixed; right:calc(var(--copilot-w) + 22px); bottom:22px; display:flex; flex-direction:column; gap:8px; z-index:150; }
+.shell.copilot-collapsed .toaster{ bottom:78px; }
 .toast{ display:flex; align-items:center; gap:9px; background:var(--forest-elevated); border:1px solid var(--border-strong); border-radius:var(--radius-md); padding:10px 14px; font-size:12.5px; font-weight:500; color:var(--fg1); box-shadow:var(--shadow-lg); animation:tin .28s var(--ease-out); }
 .toast .ic{ color:var(--accent); }
 .toast.gold .ic{ color:var(--compass-400); }

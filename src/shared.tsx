@@ -1,7 +1,7 @@
 // Shared bits between the shell and the four views.
 import type { JobModel, JobStatus, MediaList, Storyboard } from "./api";
 
-export type Mode = "chat" | "board" | "create" | "animate" | "head" | "studio" | "media" | "models" | "projects" | "companies" | "settings";
+export type Mode = "chat" | "board" | "script" | "create" | "animate" | "head" | "studio" | "media" | "models" | "projects" | "companies" | "settings";
 
 export type Suggestion = { label: string; run: () => void };
 
@@ -9,6 +9,10 @@ export type Suggestion = { label: string; run: () => void };
 export type PS = {
   apiKey: string;
   models: JobModel[];
+  catalogRevision: string | null;
+  catalogAvailable: boolean;
+  catalogLimits: Record<string, number>;
+  refreshModels(force?: boolean): Promise<void>;
   media: MediaList | null;
   refreshMedia(): void;
   board: Storyboard | null;
@@ -52,7 +56,7 @@ export function relTime(ts: number): string {
 
 export function kindOf(contentType: string, url = ""): "image" | "audio" | "video" | "model" {
   const s = contentType + " " + url;
-  if (/model\/vrm|\.vrm(?:$|[?#])/i.test(s)) return "model";
+  if (/model\/(?:vrm|gltf-binary|gltf\+json)|\.(?:vrm|glb|gltf)(?:$|[?#])/i.test(s)) return "model";
   if (/audio|\.mp3|\.wav|\.m4a/i.test(s)) return "audio";
   if (/video|\.mp4|\.webm/i.test(s)) return "video";
   return "image";
@@ -79,6 +83,9 @@ export const IcChat = () => (
 );
 export const IcBoard = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="14" rx="2" /><path d="M3 9h18M9 4v14" /></svg>
+);
+export const IcScript = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round"><path d="M6 3h9l4 4v14H6z" /><path d="M15 3v4h4M9 12h7M9 16h5" /></svg>
 );
 export const IcStudio = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16v4H4zM4 12h10v8H4zM17 12h3v8h-3z" /></svg>

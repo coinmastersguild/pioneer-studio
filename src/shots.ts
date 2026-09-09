@@ -1,11 +1,29 @@
 // Shared shot-render pipeline: generate via the storyboard route (server
 // reuses the jobs trust boundary), poll the job, attach the R2 result back
 // onto the shot. Used by BoardView and StudioView.
-import { attachShotResult, fetchMedia, generateShot, patchShot, type Shot } from "./api";
+import { attachShotResult, fetchMedia, generateShot, patchShot, type JobModel, type Shot } from "./api";
 import { pickModel } from "./pipeline";
 import type { PS } from "./shared";
 
 const inFlight = new Set<string>(); // shotIds being polled — shared across views
+
+export function imageEditPlan(
+  models: JobModel[],
+  editFrom: string,
+  refs: string[] = [],
+  editPrompt?: string,
+): { model: JobModel | undefined; params: Record<string, unknown> } {
+  const images = [...new Set([editFrom, ...refs].map((url) => url.trim()).filter(Boolean))].slice(0, 4);
+  const prompt = editPrompt?.trim();
+  const multiReference = images.length > 1;
+  return {
+    model: pickModel(models, multiReference ? "image_refs" : "image_edit"),
+    params: {
+      ...(multiReference ? { images } : { image: editFrom }),
+      ...(prompt ? { prompt } : {}),
+    },
+  };
+}
 
 export async function trackShotJob(ps: PS, shotId: string, jobId: string): Promise<void> {
   if (inFlight.has(shotId)) return;
@@ -47,8 +65,10 @@ export async function renderShot(
   }
   // Editing the still that is already there beats generating a replacement for
   // it: a beat whose image the user chose must keep that image as the subject.
+  // Keep the assigned character/location sheets too, so re-rendering cannot
+  // silently bypass the identity and environment locks.
   if (opts?.editFrom) {
-    const editModel = pickModel(ps.models, "image_edit");
+    const { model: editModel, params } = imageEditPlan(ps.models, opts.editFrom, opts.refs, opts.editPrompt);
     if (!editModel) {
       ps.toast("No image-edit model on this account — nothing to edit with");
       return;
@@ -56,10 +76,7 @@ export async function renderShot(
     ps.setBoard(await patchShot(ps.apiKey, undefined, shot.id, { model: editModel.model, endpoint: editModel.endpoint }));
     // params override the shot's own prompt server-side, so a repair
     // instruction can drive the edit without rewriting the beat text
-    const edited = await generateShot(ps.apiKey, shot.id, {
-      image: opts.editFrom,
-      ...(opts.editPrompt?.trim() ? { prompt: opts.editPrompt.trim() } : {}),
-    });
+    const edited = await generateShot(ps.apiKey, shot.id, params);
     ps.setBoard(edited);
     ps.charge(null);
     const running = edited.shots.find((s) => s.id === shot.id);

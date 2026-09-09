@@ -3,19 +3,24 @@ import { captionImage, patchShot, uploadMedia, type MediaObject, type Shot } fro
 import { isShotRunning, renderShot } from "./shots";
 import { fmtTime, kindOf, PH, type PS } from "./shared";
 import {
+  assignBeatGeography,
   beatRefs,
   buildFinalPrompt,
   extOf,
   genImage,
+  geographyIssues,
+  geographyPrompt,
+  locationsAdjacent,
   markBeatEdited,
   motionSummary,
   pickModel,
   proposeTracers,
   REF_INTENTS,
   refIntentOf,
-  ttsLine,
+  speakAs,
   writeDrivingPrompt,
   type Pipeline,
+  type BeatGeography,
   type Tracer,
 } from "./pipeline";
 import { solveCameraFromClip } from "./cameraSolve";
@@ -50,9 +55,28 @@ export default function BeatDialog({
   const rendering = isShotRunning(shot);
   const t0 = index * 10; // fixed 10s grid (BEAT_SECONDS)
   const approved = pipe.characters.filter((c) => c.approved);
+  const approvedLocations = (pipe.locations || []).filter((location) => location.approved);
+  const assignedLocation = (pipe.locations || []).find((location) => location.id === ext.locationId);
+  const geographyProblems = geographyIssues(shot, pipe, ext);
+  const nearbyLocations = approvedLocations.filter(
+    (location) => !!ext.locationId && location.id !== ext.locationId && locationsAdjacent(pipe, ext.locationId, location.id),
+  );
   const nameOf = (id: string | null) => pipe.characters.find((c) => c.id === id)?.name || "camera";
   const videoModel = pickModel(ps.models, "video");
   const speech = ext.tracers.filter((t) => t.kind === "speech");
+  const narration = ext.audioCues || [];
+  const updateGeography = (patch: Partial<BeatGeography>) => {
+    if (!ext.locationId) return;
+    mut((p) => void assignBeatGeography(p, shot.id, {
+      locationId: ext.locationId!,
+      movement: ext.geography?.movement || "hold",
+      screenDirection: ext.geography?.screenDirection || "hold",
+      entryFromId: ext.geography?.entryFromId,
+      exitToId: ext.geography?.exitToId,
+      anchor: ext.geography?.anchor,
+      ...patch,
+    }));
+  };
 
   const run = async (row: string, fn: () => Promise<void>) => {
     if (busy) return;
@@ -92,11 +116,11 @@ export default function BeatDialog({
     run("text", async () => {
       const fresh = await saveText();
       if (!fresh || !text.trim()) return;
-      if (fresh.result) await renderShot(ps, fresh, { editFrom: fresh.result.url });
+      if (fresh.result) await renderShot(ps, fresh, { editFrom: fresh.result.url, refs: beatRefs(pipe, ext) });
       else await renderShot(ps, fresh, { refs: beatRefs(pipe, ext) });
     });
 
-  const defaultFinal = () => buildFinalPrompt(shot.prompt, ext, pipe.characters);
+  const defaultFinal = () => buildFinalPrompt(shot.prompt, ext, pipe);
 
   /** The description says what the picture IS; the driving prompt says what the
    *  ten seconds DO. Written from the still itself, so it never re-describes
@@ -105,12 +129,13 @@ export default function BeatDialog({
     run("driving", async () => {
       if (!shot.result) throw new Error("give this beat a still first — the driving prompt is written from it");
       const nameOf = (id: string | null) => pipe.characters.find((c) => c.id === id)?.name || (id ? "subject" : "camera");
-      const written = await writeDrivingPrompt(
+      const action = await writeDrivingPrompt(
         ps.apiKey,
         shot.result.url,
         shot.prompt,
         [motionSummary(ext.tracers, nameOf), ext.cameraMove].filter(Boolean).join(". "),
       );
+      const written = [geographyPrompt(pipe, ext), action].filter(Boolean).join(" ");
       setFinalPrompt(written);
       mut((p) => {
         const x = extOf(p, shot.id);
@@ -335,12 +360,112 @@ export default function BeatDialog({
               </div>
             </div>
 
+            {/* ── Location for this beat ── */}
+            <div className="bd-row">
+              <div className="k">Location</div>
+              <div className="v">
+                {approvedLocations.length ? (
+                  <div className="bd-chips">
+                    {approvedLocations.map((location) => (
+                      <label key={location.id} className="bd-chip">
+                        <input
+                          type="radio"
+                          name={`location-${shot.id}`}
+                          checked={ext.locationId === location.id}
+                          onChange={() =>
+                            mut((p) => void assignBeatGeography(p, shot.id, {
+                              locationId: location.id,
+                              movement: "hold",
+                              screenDirection: "hold",
+                              anchor: "",
+                            }))
+                          }
+                        />
+                        {location.name}
+                        {location.image && <i className="bd-thumb" style={img(location.image)} />}
+                      </label>
+                    ))}
+                    {ext.locationId && (
+                      <button
+                        type="button"
+                        className="beat-btn"
+                        onClick={() =>
+                          mut((p) => {
+                            const x = extOf(p, shot.id);
+                            delete x.locationId;
+                            delete x.geography;
+                            p.beats[shot.id] = x;
+                            markBeatEdited(p, shot.id);
+                          })
+                        }
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <div className="bd-desc">no approved locations yet — add and approve plates in the Assets panel</div>
+                )}
+                {assignedLocation && (
+                  <div className="geo-plan">
+                    <div className="geo-plan-head">
+                      <b>Route and blocking</b>
+                      <span>{assignedLocation.kind === "transition" ? "transition" : "zone"}</span>
+                    </div>
+                    <div className="geo-plan-grid">
+                      <label>
+                        Movement
+                        <select value={ext.geography?.movement || "hold"} onChange={(event) => updateGeography({ movement: event.target.value as BeatGeography["movement"] })}>
+                          <option value="hold">Hold here</option>
+                          <option value="enter">Enter</option>
+                          <option value="cross">Cross through</option>
+                          <option value="exit">Exit</option>
+                          <option value="arrive">Arrive</option>
+                        </select>
+                      </label>
+                      <label>
+                        Screen direction
+                        <select value={ext.geography?.screenDirection || "hold"} onChange={(event) => updateGeography({ screenDirection: event.target.value as BeatGeography["screenDirection"] })}>
+                          <option value="hold">Hold</option>
+                          <option value="left-to-right">Left → right</option>
+                          <option value="right-to-left">Right → left</option>
+                          <option value="toward-camera">Toward camera</option>
+                          <option value="away-camera">Away from camera</option>
+                        </select>
+                      </label>
+                      <label>
+                        Enter from
+                        <select value={ext.geography?.entryFromId || ""} onChange={(event) => updateGeography({ entryFromId: event.target.value || undefined })}>
+                          <option value="">Starts here</option>
+                          {nearbyLocations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}
+                        </select>
+                      </label>
+                      <label>
+                        Exit toward
+                        <select value={ext.geography?.exitToId || ""} onChange={(event) => updateGeography({ exitToId: event.target.value || undefined })}>
+                          <option value="">Ends here</option>
+                          {nearbyLocations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}
+                        </select>
+                      </label>
+                    </div>
+                    <label className="geo-anchor">
+                      Landmark / blocking anchor
+                      <input value={ext.geography?.anchor || ""} placeholder="stream bridge, village lane, clearing tree line…" onChange={(event) => updateGeography({ anchor: event.target.value })} />
+                    </label>
+                    {geographyProblems.length > 0 && <div className="geo-issues">{geographyProblems.join(" · ")}</div>}
+                  </div>
+                )}
+              </div>
+            </div>
+
             {/* ── Motion tracers ── */}
             <div className="bd-row">
               <div className="k">Tracers</div>
               <div className="v">
                 <TracerEditor
                   bg={shot.result?.url || null}
+                  locationBg={assignedLocation?.image?.url || null}
+                  locationName={assignedLocation?.name || null}
                   tracers={ext.tracers}
                   chars={pipe.characters}
                   onChange={(next: Tracer[]) =>
@@ -359,10 +484,18 @@ export default function BeatDialog({
                     onClick={() =>
                       run("tracers", async () => {
                         const chars = approved.filter((c) => ext.characterIds.includes(c.id));
-                        const ts = await proposeTracers(ps.apiKey, shot.prompt, chars.length ? chars : approved);
+                        const ts = await proposeTracers(
+                          ps.apiKey,
+                          [shot.prompt, assignedLocation && geographyPrompt(pipe, ext)]
+                            .filter(Boolean)
+                            .join("\n"),
+                          chars.length ? chars : approved,
+                        );
                         mut((p) => {
                           const x = extOf(p, shot.id);
-                          x.tracers = ts;
+                          // authored speech survives a re-draft; see AssetsPanel
+                          const written = x.tracers.filter((t) => t.kind === "speech");
+                          x.tracers = [...written, ...ts.filter((t) => t.kind === "move" || !written.length)];
                           p.beats[shot.id] = x;
                         });
                       })
@@ -378,6 +511,18 @@ export default function BeatDialog({
             <div className="bd-row">
               <div className="k">Audio</div>
               <div className="v">
+                {narration.length > 0 && (
+                  <div className="bd-narration">
+                    <div className="bd-desc">Master-mix narration · voiceover only, never lip sync</div>
+                    {narration.map((cue, cueIndex) => (
+                      <div className="bd-voice" key={`${cue.at}-${cueIndex}`}>
+                        <span className="bd-desc">
+                          {cue.speaker} @ {cue.at.toFixed(1)}s — “{cue.text}”
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {speech.length ? (
                   speech.map((t) => (
                     <div key={t.id} className="bd-voice">
@@ -390,7 +535,7 @@ export default function BeatDialog({
                         disabled={busy === "voice" + t.id}
                         onClick={() =>
                           run("voice" + t.id, async () => {
-                            const art = await ttsLine(ps, t.text || "");
+                            const art = await speakAs(ps, pipe, t.characterId, t.text || "", mut);
                             mut((p) => {
                               const x = extOf(p, shot.id);
                               x.voices[t.id] = art;
@@ -404,9 +549,9 @@ export default function BeatDialog({
                       {ext.voices[t.id] && <audio controls src={ext.voices[t.id].url} />}
                     </div>
                   ))
-                ) : (
+                ) : narration.length === 0 ? (
                   <div className="bd-desc">add speech tracers above — each line becomes a timestamped voice clip. Music &amp; the full mix live in the Assets panel.</div>
-                )}
+                ) : null}
               </div>
             </div>
 
@@ -501,6 +646,9 @@ export default function BeatDialog({
                   {ext.tracers.length ? " · tracers ride along as words in the prompt, never as pixels" : ""}
                   {!videoModel && " — no video model available right now"}
                 </div>
+                {geographyProblems.length > 0 && (
+                  <div className="geo-issues">Final render locked: {geographyProblems.join(" · ")}</div>
+                )}
                 {!shot.result && (
                   <div className="bd-desc">
                     no still on this beat — the clip is generated from the prompt alone
@@ -513,7 +661,7 @@ export default function BeatDialog({
                   <button
                     type="button"
                     className="beat-btn accent"
-                    disabled={!videoModel || busy === "final"}
+                    disabled={!videoModel || busy === "final" || geographyProblems.length > 0}
                     onClick={() =>
                       run("final", async () => {
                         const prompt = finalPrompt.trim() || defaultFinal();

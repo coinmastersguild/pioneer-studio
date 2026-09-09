@@ -15,6 +15,7 @@ test("registered actions become model tools and execute through the same handler
         additionalProperties: false,
       },
       confirmation: "test confirmation",
+      confirmationFor: (params) => `confirm seek to ${params.t}`,
       run: (params) => void (sought = Number(params?.t)),
     },
   ]);
@@ -39,7 +40,9 @@ test("registered actions become model tools and execute through the same handler
   }) as typeof fetch;
 
   const turn = await beginStudioAgentTurn("key", "seek to four seconds", { mode: "studio", board: null });
-  expect(turn.actions[0]).toMatchObject({ actionName: "test.seek", params: { t: 4 }, confirmation: "test confirmation" });
+  expect(requests[0].messages[0].content).toContain("call jobs_submit");
+  expect(requests[0].messages[0].content).toContain('Never print a {"job": ...} plan');
+  expect(turn.actions[0]).toMatchObject({ actionName: "test.seek", params: { t: 4 }, confirmation: "confirm seek to 4" });
   const result = await executeStudioAction(turn.actions[0]);
   expect(sought).toBe(4);
   expect(result.error).toBeUndefined();

@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { activeProjectStudioTimeline, patchShot, saveActiveProjectStudioTimeline, uploadMedia, type MediaObject, type Shot, type ShotStatus } from "./api";
 import { fmtTime, kindOf, PH, type PS } from "./shared";
 import { isShotRunning, renderShot } from "./shots";
-import { assembleRelease, BEAT_SECONDS, extOf, loadPipeline, pickModel, savePipeline, type Pipeline } from "./pipeline";
+import { assembleRelease, BEAT_SECONDS, extOf, geographyIssues, loadPipeline, pickModel, savePipeline, type Pipeline } from "./pipeline";
+import { beatReadiness } from "./readiness";
 import { registerActions } from "./control";
 import AudioWaveform from "./AudioWaveform";
 import { consumeStudioAssets } from "./studioHandoff";
@@ -11,8 +12,9 @@ import {
   addClip,
   addTrack,
   buildStudioExportPlan,
-  createStudioClip,
+  createMediaClipSet,
   duplicateClip,
+  fadeGainAt,
   loadStudioTimeline,
   moveClip,
   moveClipToTrack,
@@ -25,7 +27,9 @@ import {
   removeTrack,
   reorderTrack,
   rippleRemoveClip,
+  rippleMoveClip,
   saveStudioTimeline,
+  sharedInsertionStart,
   splitClip,
   studioTimelineEnd,
   studioTimelineForPersistence,
@@ -39,6 +43,10 @@ import {
 } from "./studioTimeline";
 
 const W = 1180;
+// 8x lets you land a cut on a single frame at 24fps; the old 4x ceiling was
+// reachable in two shift-wheel notches and stopped being useful there.
+const ZOOM_MIN = 0.5;
+const ZOOM_MAX = 8;
 const DRAG_TYPE = "application/x-pioneer-studio-asset";
 
 type EShot = {
@@ -125,6 +133,13 @@ function defaultDuration(kind: StudioClipKind): number {
   return kind === "image" ? 5 : 10;
 }
 
+function fadeEnvelopePoints(clip: Pick<StudioClip, "duration" | "fadeIn" | "fadeOut">): string {
+  const duration = Math.max(0.25, clip.duration);
+  const fadeInX = Math.min(100, (clip.fadeIn / duration) * 100);
+  const fadeOutX = Math.max(0, 100 - (clip.fadeOut / duration) * 100);
+  return `0,34 ${fadeInX},4 ${fadeOutX},4 100,34`;
+}
+
 function probeDuration(url: string, kind: StudioClipKind): Promise<number | null> {
   if (kind === "image") return Promise.resolve(null);
   return new Promise((resolve) => {
@@ -193,6 +208,7 @@ export default function StudioView({ ps }: { ps: PS }) {
   const monitorRef = useRef<HTMLDivElement>(null);
   const gutterRef = useRef<HTMLDivElement>(null);
   const lanesRef = useRef<HTMLDivElement>(null);
+  const innerRef = useRef<HTMLDivElement>(null);
   const monVideoRef = useRef<HTMLVideoElement>(null);
   const audioEls = useRef(new Map<string, HTMLAudioElement>());
   const audioCallbacks = useRef(new Map<string, (el: HTMLAudioElement | null) => void>());
@@ -381,9 +397,12 @@ export default function StudioView({ ps }: { ps: PS }) {
     setPlaying(next);
   }
 
-  function dragSeek(map: (fraction: number) => number) {
+  // `measure` overrides which element the pointer fraction is taken against.
+  // The playhead handle needs it: it is a few px wide and moves with the
+  // playhead, so measuring against itself makes every drag snap to 0 or the end.
+  function dragSeek(map: (fraction: number) => number, measure?: () => HTMLElement | null) {
     return (event: React.PointerEvent) => {
-      const element = event.currentTarget as HTMLElement;
+      const element = measure?.() ?? (event.currentTarget as HTMLElement);
       const go = (clientX: number) => {
         const rect = element.getBoundingClientRect();
         seekTo(map(Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))));
@@ -404,6 +423,56 @@ export default function StudioView({ ps }: { ps: PS }) {
   }
 
   const scrubStart = dragSeek((fraction) => fraction * TL);
+  // grab the white line itself and scrub — measured against the full lane
+  const playheadDrag = dragSeek((fraction) => fraction * TL, () => innerRef.current);
+
+  // Everything the pipeline knows about the beat under the inspector, so the
+  // panel is the one place to look while the cut plays.
+  const beatDetail = useMemo(() => {
+    const shot = ps.board?.shots?.find((s) => s.id === cur?.id);
+    if (!shot) return null;
+    const ext = extOf(pipe, shot.id);
+    return {
+      locationName: (pipe.locations || []).find((l) => l.id === ext.locationId)?.name || ext.locationId || "",
+      cast: ext.characterIds.map((id) => pipe.characters.find((c) => c.id === id)?.name || id),
+      readiness: beatReadiness(shot, pipe),
+      geographyIssues: geographyIssues(shot, pipe, ext),
+      lines: ext.tracers
+        .filter((t) => t.kind === "speech")
+        .sort((a, b) => (a.path[0]?.t ?? 0) - (b.path[0]?.t ?? 0))
+        .map((t) => ({
+          id: t.id,
+          who: (t.characterId && pipe.characters.find((c) => c.id === t.characterId)?.name) || "NARRATION",
+          text: t.text || "",
+          voiced: !!ext.voices[t.id],
+        })),
+    };
+  }, [cur?.id, pipe, ps.board]);
+
+  // The inspector follows the playhead, so the panel always describes the beat
+  // you are watching. A selected clip wins — otherwise editing a clip's fades
+  // would be yanked away by the next beat boundary.
+  useEffect(() => {
+    if (selectedClipId) return;
+    const at = shots.findIndex((shot) => playT >= shot.a && playT < shot.b);
+    if (at >= 0 && at !== sel) setSel(at);
+  }, [playT, selectedClipId, shots, sel]);
+
+  // Shift+wheel zooms the timeline, holding the instant under the pointer still
+  // (Premiere's behaviour). Plain wheel is left alone so the lanes still scroll.
+  function wheelZoom(event: React.WheelEvent<HTMLDivElement>) {
+    if (!event.shiftKey) return;
+    event.preventDefault();
+    const lanes = event.currentTarget;
+    const offsetX = event.clientX - lanes.getBoundingClientRect().left;
+    const atPointer = (lanes.scrollLeft + offsetX) / Math.round(W * zoom); // 0–1 across the cut
+    const next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom * (event.deltaY < 0 ? 1.2 : 1 / 1.2)));
+    if (next === zoom) return;
+    setZoom(next);
+    requestAnimationFrame(() => {
+      lanes.scrollLeft = atPointer * Math.round(W * next) - offsetX;
+    });
+  }
 
   useEffect(() => {
     if (!playing || END <= 0) return;
@@ -431,8 +500,10 @@ export default function StudioView({ ps }: { ps: PS }) {
     const video = monVideoRef.current;
     if (!video || !mon || mon.kind !== "video") return;
     const local = mon.trimIn + Math.max(0, playT - mon.start);
-    if (Math.abs(video.currentTime - local) > 0.3) video.currentTime = local;
-    video.volume = Math.max(0, Math.min(1, mon.volume * timeline.masterVolume));
+    // Loose while playing so we never fight the element's own clock; tight while
+    // parked so dragging the playhead actually shows the frame you land on.
+    if (Math.abs(video.currentTime - local) > (playing ? 0.3 : 0.04)) video.currentTime = local;
+    video.volume = Math.max(0, Math.min(1, mon.volume * (trackById.get(mon.trackId)?.volume ?? 1) * timeline.masterVolume * fadeGainAt(mon, playT - mon.start)));
     video.muted = mon.muted || !!trackById.get(mon.trackId)?.muted || timeline.masterVolume === 0;
     if (playing) {
       if (video.paused) video.play().catch(() => {
@@ -448,7 +519,7 @@ export default function StudioView({ ps }: { ps: PS }) {
       const audio = audioEls.current.get(clip.id);
       if (!audio) continue;
       const active = playT >= clip.start && playT < clip.start + clip.duration;
-      audio.volume = Math.max(0, Math.min(1, clip.volume * timeline.masterVolume));
+      audio.volume = Math.max(0, Math.min(1, clip.volume * (trackById.get(clip.trackId)?.volume ?? 1) * timeline.masterVolume * fadeGainAt(clip, playT - clip.start)));
       audio.muted = clip.muted || !!trackById.get(clip.trackId)?.muted || timeline.masterVolume === 0;
       if (active) {
         const local = clip.trimIn + playT - clip.start;
@@ -553,6 +624,7 @@ export default function StudioView({ ps }: { ps: PS }) {
     trimIn: number;
     timelineLength: number;
     timelineWidth: number;
+    timeline: StudioTimeline;
     recorded: boolean;
   }>(null);
   const [snapT, setSnapT] = useState<number | null>(null);
@@ -583,7 +655,9 @@ export default function StudioView({ ps }: { ps: PS }) {
       if (drag.mode === "move") {
         const start = snap(drag.start + delta, drag.id);
         setSnapT(start);
-        updateTimeline((doc) => moveClip(doc, drag.id, start), !drag.recorded);
+        const lane = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-track-id]");
+        const targetTrackId = lane?.dataset.trackId;
+        updateTimeline(() => rippleMoveClip(drag.timeline, drag.id, start, targetTrackId), !drag.recorded);
         drag.recorded = true;
         return;
       }
@@ -630,6 +704,7 @@ export default function StudioView({ ps }: { ps: PS }) {
       trimIn: clip.trimIn,
       timelineLength: tlRef.current,
       timelineWidth: timelineWidthRef.current,
+      timeline: structuredClone(timelineRef.current),
       recorded: false,
     };
     document.body.style.cursor = mode === "move" ? "grabbing" : "col-resize";
@@ -662,14 +737,17 @@ export default function StudioView({ ps }: { ps: PS }) {
     return !!tracksRef.current.find((track) => track.id === clip.trackId)?.locked;
   }
 
-  function removeSelectedClip() {
-    if (!selectedClipId) return;
-    const clip = clipsRef.current.find((item) => item.id === selectedClipId);
+  function removeClipById(id: string) {
+    const clip = clipsRef.current.find((item) => item.id === id);
     if (!clip) return;
     if (clipIsLocked(clip)) return psRef.current.toast("Unlock the track before removing this clip");
     updateTimeline((doc) => removeClip(doc, clip.id));
-    setSelectedClipId(null);
+    if (selectedClipRef.current === id) setSelectedClipId(null);
     psRef.current.toast(`${clip.name} removed from timeline`, "ok");
+  }
+
+  function removeSelectedClip() {
+    if (selectedClipId) removeClipById(selectedClipId);
   }
 
   function splitSelectedClip() {
@@ -739,23 +817,29 @@ export default function StudioView({ ps }: { ps: PS }) {
     );
   }
 
-  function addAsset(asset: DragAsset, start: number, preferredTrackId?: string): StudioClip | null {
-    const track = targetTrack(asset.kind, preferredTrackId);
-    if (!track) {
-      psRef.current.toast(`Unlock a ${asset.kind === "audio" ? "audio" : "video"} track before adding media`);
-      return null;
+  function addAsset(asset: DragAsset, start: number, preferredTrackId?: string): StudioClip[] {
+    const preferred = tracksRef.current.find((track) => track.id === preferredTrackId);
+    const videoTrack = targetTrack("video", preferred?.kind === "video" ? preferred.id : undefined);
+    const audioTrack = targetTrack("audio", preferred?.kind === "audio" ? preferred.id : undefined);
+    const neededTrack = asset.kind === "audio" ? audioTrack : videoTrack;
+    if (!neededTrack || (asset.kind === "video" && !audioTrack)) {
+      psRef.current.toast(`Unlock ${asset.kind === "video" ? "video and audio tracks" : `a ${asset.kind === "audio" ? "audio" : "video"} track`} before adding media`);
+      return [];
     }
-    const clip = createStudioClip(asset, start, asset.duration, track.id);
-    updateTimeline((doc) => addClip(doc, clip));
-    setSelectedClipId(clip.id);
-    seekTo(clip.start);
-    if (clip.url && clip.kind !== "image") {
-      void probeDuration(clip.url, clip.kind).then((duration) => {
+    const placementTracks = asset.kind === "video" ? [videoTrack!.id, audioTrack!.id] : [neededTrack.id];
+    const placementStart = sharedInsertionStart(timelineRef.current, placementTracks, start);
+    const created = createMediaClipSet(asset, placementStart, asset.duration, videoTrack?.id, audioTrack?.id);
+    updateTimeline((doc) => created.reduce((next, clip) => addClip(next, clip), doc));
+    const primary = created[0];
+    setSelectedClipId(primary.id);
+    seekTo(primary.start);
+    if (primary.url && primary.kind !== "image") {
+      void probeDuration(primary.url, primary.kind).then((duration) => {
         if (!duration) return;
-        updateTimeline((doc) => patchClip(doc, clip.id, { duration, sourceDuration: duration }));
+        updateTimeline((doc) => created.reduce((next, clip) => patchClip(next, clip.id, { duration, sourceDuration: duration }), doc));
       });
     }
-    return clip;
+    return created;
   }
 
   function trackEnd(kind: StudioClipKind, trackId?: string): number {
@@ -773,9 +857,9 @@ export default function StudioView({ ps }: { ps: PS }) {
     let added = 0;
     for (const asset of pending) {
       if (clipsRef.current.some((clip) => clip.sourceId === asset.sourceId)) continue;
-      const clip = addAsset({ ...asset, origin: "library" }, cursor);
-      if (!clip) continue;
-      cursor += clip.duration;
+      const placed = addAsset({ ...asset, origin: "library" }, cursor);
+      if (!placed.length) continue;
+      cursor += placed[0].duration;
       added++;
     }
     if (added) psRef.current.toast(`${added} Animation take${added === 1 ? "" : "s"} placed on the Studio timeline`, "ok");
@@ -809,7 +893,7 @@ export default function StudioView({ ps }: { ps: PS }) {
           continue;
         }
         const at = kind === "audio" ? audioAt : visualAt;
-        const clip = addAsset(
+        const placed = addAsset(
           {
             origin: "upload",
             sourceId: `upload:${uploaded.key}`,
@@ -822,9 +906,9 @@ export default function StudioView({ ps }: { ps: PS }) {
           at,
           preferredTrackId,
         );
-        if (!clip) continue;
-        if (kind === "audio") audioAt += clip.duration;
-        else visualAt += clip.duration;
+        if (!placed.length) continue;
+        if (kind === "audio") audioAt += placed[0].duration;
+        else visualAt += placed[0].duration;
         p.toast(`${file.name} added to ${kind === "audio" ? "Audio" : "Video"}`, "ok");
       } catch (error: any) {
         p.toast(String(error.message || error));
@@ -851,9 +935,10 @@ export default function StudioView({ ps }: { ps: PS }) {
       const asset = JSON.parse(event.dataTransfer.getData(DRAG_TYPE)) as DragAsset;
       if (!asset?.kind || !asset.name) throw new Error("bad drag payload");
       const expectedKind = asset.kind === "audio" ? "audio" : "video";
-      if (track.kind !== expectedKind) return psRef.current.toast(`${asset.name} belongs on a ${expectedKind} track`);
+      if (asset.kind !== "video" && track.kind !== expectedKind)
+        return psRef.current.toast(`${asset.name} belongs on a ${expectedKind} track`);
       addAsset(asset, start, track.id);
-      psRef.current.toast(`${asset.name} added at ${fmt(start)}`, "ok");
+      psRef.current.toast(`${asset.name} added${asset.kind === "video" ? " to video + audio" : ""} at ${fmt(start)}`, "ok");
     } catch {
       psRef.current.toast("Drag a project asset, beat, or media file onto a timeline lane");
     }
@@ -959,7 +1044,7 @@ export default function StudioView({ ps }: { ps: PS }) {
           selectedClipId: selectedClipRef.current,
           end: endRef.current,
           tracks: timelineRef.current.tracks,
-          clips: clipsRef.current.map(({ id, name, kind, trackId, start, duration, volume, muted }) => ({ id, name, kind, trackId, start, duration, volume, muted })),
+          clips: clipsRef.current.map(({ id, name, kind, trackId, start, duration, volume, muted, fadeIn, fadeOut, linkGroupId }) => ({ id, name, kind, trackId, start, duration, volume, muted, fadeIn, fadeOut, linkGroupId })),
           masterVolume: timelineRef.current.masterVolume,
         }),
       },
@@ -1304,6 +1389,24 @@ export default function StudioView({ ps }: { ps: PS }) {
                         <div className="fl"><span>Clip level</span><span className="v">{Math.round(selectedClip.volume * 100)}%</span></div>
                         <input className="level-slider" type="range" min="0" max="100" disabled={clipIsLocked(selectedClip)} value={Math.round(selectedClip.volume * 100)} onChange={(event) => updateClip(selectedClip.id, { volume: Number(event.target.value) / 100 })} />
                       </div>
+                      <div className="field">
+                        <div className="fl"><span>{trackById.get(selectedClip.trackId)?.name} level</span><span className="v">{Math.round((trackById.get(selectedClip.trackId)?.volume ?? 1) * 100)}%</span></div>
+                        <input className="level-slider" type="range" min="0" max="100" disabled={clipIsLocked(selectedClip)} value={Math.round((trackById.get(selectedClip.trackId)?.volume ?? 1) * 100)} onChange={(event) => updateTimeline((doc) => patchTrack(doc, selectedClip.trackId, { volume: Number(event.target.value) / 100 }))} />
+                      </div>
+                      <div className="fade-editor">
+                        <div className="fl"><span>Fade envelope</span><span className="v">{selectedClip.fadeIn.toFixed(1)}s in · {selectedClip.fadeOut.toFixed(1)}s out</span></div>
+                        <svg viewBox="0 0 100 38" preserveAspectRatio="none" role="img" aria-label="Clip volume fade envelope">
+                          <polyline points={fadeEnvelopePoints(selectedClip)} />
+                        </svg>
+                        <label>
+                          <span>Fade in</span>
+                          <input type="range" min="0" max={selectedClip.duration} step="0.1" disabled={clipIsLocked(selectedClip)} value={selectedClip.fadeIn} onChange={(event) => updateClip(selectedClip.id, { fadeIn: Number(event.target.value) })} />
+                        </label>
+                        <label>
+                          <span>Fade out</span>
+                          <input type="range" min="0" max={selectedClip.duration} step="0.1" disabled={clipIsLocked(selectedClip)} value={selectedClip.fadeOut} onChange={(event) => updateClip(selectedClip.id, { fadeOut: Number(event.target.value) })} />
+                        </label>
+                      </div>
                       <button type="button" className={`clip-action${selectedClip.muted ? " active" : ""}`} onClick={() => updateClip(selectedClip.id, { muted: !selectedClip.muted })}>{selectedClip.muted ? "Unmute clip" : "Mute clip"}</button>
                     </div>
                   </div>
@@ -1324,9 +1427,33 @@ export default function StudioView({ ps }: { ps: PS }) {
                 <div className="igbody">
                   <div className="row2">
                     <div className="field"><div className="fl">Duration</div><input className="inp mono" readOnly value={cur ? `${(cur.b - cur.a).toFixed(1)}s` : "—"} /></div>
-                    <div className="field"><div className="fl">Media</div><input className="inp" readOnly value={cur ? (cur.isFinal ? "final clip" : cur.mediaUrl ? "placeholder" : "none") : "—"} /></div>
+                    <div className="field"><div className="fl">Media</div><input className="inp" readOnly value={cur ? (cur.isFinal ? "final clip" : cur.mediaUrl ? "still only" : "none") : "—"} /></div>
                   </div>
+                  <div className="row2">
+                    <div className="field"><div className="fl">Location</div><input className="inp" readOnly value={beatDetail?.locationName || "—"} /></div>
+                    <div className="field"><div className="fl">Readiness</div><input className="inp mono" readOnly value={beatDetail ? `${beatDetail.readiness.score} · ${beatDetail.readiness.band}` : "—"} /></div>
+                  </div>
+                  <div className="field"><div className="fl">Cast</div><input className="inp" readOnly value={beatDetail?.cast.join(", ") || "none assigned"} /></div>
                   <div className="field"><div className="fl">Prompt</div><textarea className="inp" rows={3} value={promptDraft ?? cur?.prompt ?? ""} placeholder="Describe this beat…" onChange={(event) => setPromptDraft(event.target.value)} onBlur={savePrompt} /></div>
+                  {/* the spoken track for this beat — authored in Script mode */}
+                  {!!beatDetail?.lines.length && (
+                    <div className="field">
+                      <div className="fl">Script</div>
+                      {beatDetail.lines.map((line) => (
+                        <div key={line.id} className="insp-line">
+                          <span className="il-who mono">{line.who}</span>
+                          <span className="il-text">{line.text || <i>empty line</i>}</span>
+                          {!line.voiced && <span className="badge gen">no voice</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {!!beatDetail?.geographyIssues.length && (
+                    <div className="field">
+                      <div className="fl">Blocked</div>
+                      {beatDetail.geographyIssues.map((issue) => <div key={issue} className="insp-issue">{issue}</div>)}
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -1348,9 +1475,9 @@ export default function StudioView({ ps }: { ps: PS }) {
               <svg className="ic" viewBox="0 0 24 24" style={{ width: 12, height: 12 }}><path d="M12 3v18M3 12h18" /></svg>Magnetic
             </button>
             <div className="qsep" />
-            <label className="zoom" title="Timeline zoom">
+            <label className="zoom" title="Timeline zoom — or shift+scroll over the lanes">
               <span>{Math.round(zoom * 100)}%</span>
-              <input type="range" min="50" max="400" step="25" value={Math.round(zoom * 100)} onChange={(event) => setZoom(Number(event.target.value) / 100)} />
+              <input type="range" min={ZOOM_MIN * 100} max={ZOOM_MAX * 100} step="25" value={Math.round(zoom * 100)} onChange={(event) => setZoom(Number(event.target.value) / 100)} />
             </label>
           </div>
         </div>
@@ -1363,6 +1490,16 @@ export default function StudioView({ ps }: { ps: PS }) {
                 <span className="sw" style={{ background: track.kind === "audio" ? "var(--t-audio)" : "var(--t-video)" }} />
                 <input className="track-name" value={track.name} aria-label={`Rename ${track.name}`} onChange={(event) => updateTimeline((doc) => patchTrack(doc, track.id, { name: event.target.value }))} />
                 <span className="track-count">{clips.filter((clip) => clip.trackId === track.id).length}</span>
+                <input
+                  className="track-level"
+                  type="range"
+                  min="0"
+                  max="100"
+                  aria-label={`${track.name} level`}
+                  title={`${track.name} level · ${Math.round(track.volume * 100)}%`}
+                  value={Math.round(track.volume * 100)}
+                  onChange={(event) => updateTimeline((doc) => patchTrack(doc, track.id, { volume: Number(event.target.value) / 100 }))}
+                />
                 <span className="track-controls">
                   <button type="button" disabled={index === 0} title="Move track up" onClick={() => updateTimeline((doc) => reorderTrack(doc, track.id, -1))}>↑</button>
                   <button type="button" disabled={index === tracks.length - 1} title="Move track down" onClick={() => updateTimeline((doc) => reorderTrack(doc, track.id, 1))}>↓</button>
@@ -1373,8 +1510,13 @@ export default function StudioView({ ps }: { ps: PS }) {
               </div>
             ))}
           </div>
-          <div className="lanes" ref={lanesRef} onScroll={(event) => { if (gutterRef.current) gutterRef.current.scrollTop = event.currentTarget.scrollTop; }}>
-            <div className="lanes-inner" style={{ width: timelineWidth }}>
+          <div
+            className="lanes"
+            ref={lanesRef}
+            onScroll={(event) => { if (gutterRef.current) gutterRef.current.scrollTop = event.currentTarget.scrollTop; }}
+            onWheel={wheelZoom}
+          >
+            <div className="lanes-inner" ref={innerRef} style={{ width: timelineWidth }}>
               <div className="ruler" onPointerDown={scrubStart}>
                 {ticks.map((seconds) => <div key={seconds} className="tick" style={{ left: `${(seconds / TL) * 100}%` }}><span>{fmtTime(seconds)}</span></div>)}
               </div>
@@ -1392,6 +1534,7 @@ export default function StudioView({ ps }: { ps: PS }) {
               {tracks.map((track) => (
                 <div
                   key={track.id}
+                  data-track-id={track.id}
                   className={`lane media-lane drop-lane${dropLane === track.id ? " drop" : ""}${track.muted ? " track-muted" : ""}${track.locked ? " track-locked" : ""}`}
                   onDragEnter={(event) => { event.preventDefault(); setDropLane(track.id); }}
                   onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = track.locked ? "none" : "copy"; setDropLane(track.id); }}
@@ -1416,6 +1559,22 @@ export default function StudioView({ ps }: { ps: PS }) {
                         <span className="body"><span className="clip-type">{clip.kind === "audio" ? "♪" : clip.kind === "video" ? "▶" : "▧"}</span>{clip.name}</span>
                         {clip.kind === "audio" && <AudioWaveform url={clip.url} muted={clip.muted || track.muted} />}
                         {(clip.kind === "audio" || clip.kind === "video") && <span className="clip-gain" style={{ width: `${clip.muted ? 0 : clip.volume * 100}%` }} />}
+                        {(clip.kind === "audio" || clip.kind === "video") && (
+                          <svg className="clip-envelope" viewBox="0 0 100 38" preserveAspectRatio="none" aria-hidden="true">
+                            <polyline points={fadeEnvelopePoints(clip)} />
+                          </svg>
+                        )}
+                        <button
+                          type="button"
+                          className="clip-remove"
+                          title="Remove only this clip"
+                          aria-label={`Remove ${clip.name}`}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            removeClipById(clip.id);
+                          }}
+                        >×</button>
                         <span className="rz r" data-side="right" title="Trim end" />
                       </div>
                     );
@@ -1424,7 +1583,7 @@ export default function StudioView({ ps }: { ps: PS }) {
                 </div>
               ))}
               {snapT !== null && <div className="snapline" style={{ display: "block", left: px(snapT) }} />}
-              <div className="playhead" style={{ left: px(playT) }}><div className="ph-hit" onPointerDown={scrubStart} /><div className="ph-h" /><div className="ph-t mono">{fmt(playT)}</div></div>
+              <div className="playhead" style={{ left: px(playT) }}><div className="ph-hit" onPointerDown={playheadDrag} /><div className="ph-h" /><div className="ph-t mono">{fmt(playT)}</div></div>
             </div>
           </div>
         </div>

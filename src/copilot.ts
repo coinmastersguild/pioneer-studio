@@ -6,6 +6,7 @@ import { captionImage, chatCompletion, type ChatMessage, type JobModel, type Med
 import { extOf, type Pipeline } from "./pipeline";
 import { boardReadiness } from "./readiness";
 import { DEFAULT_AXES, type Contract } from "./workLoop";
+import { mediaKind, pathParamKind } from "./jobCatalog";
 
 /** The board as the copilot needs to see it: what exists, what is missing, and
  *  where the work actually stands. Without this it answers questions about the
@@ -55,7 +56,7 @@ export type JobPlan = {
 
 function systemPrompt(models: JobModel[], media: MediaObject[], brief: string): string {
   const modelLines = models
-    .map((m) => `- ${m.model} · ${m.endpoint} (${m.credits} cr) — ${m.note || ""}`)
+    .map((m) => `- ${m.model}.${m.endpoint} (${m.credits} cr) result=${m.result || "unknown"}${m.result_ext || ""} params=${JSON.stringify(m.params || {})} — ${m.note || ""}`)
     .join("\n");
   const mediaLines = media.length
     ? media.map((o) => `- key: ${o.key} — ${o.name} (${o.type}, ${o.content_type})`).join("\n")
@@ -98,28 +99,82 @@ ${brief}
 Available models/endpoints:
 ${modelLines}
 
-User's media (only these keys may appear in refs):
+User's media (only these keys may appear in path parameters or refs):
 ${mediaLines}
 
-Param rules by endpoint:
-- generate: {"prompt": "..."} (acestep-music also accepts "lyrics")
-- batch: {"prompts": ["...", ...]} (max 10)
-- edit: {"prompt": "..."} + exactly 1 image ref
-- multi_reference: {"prompt": "..."} + up to 4 image refs
-- lipsync: {} + 1 image ref and 1 audio ref (optionally "size": "256*256"|"480*832"|"1024*704")
-- enhance: {"prompt": "...", optional "num_frames": 121|241, optional "guide_strength": 0..1, optional "width"/"height"} + exactly 1 control video ref and optionally 1 image reference sheet. The control video carries the motion — write the prompt about look, not movement.
-Default width/height to 1536x896 on enhance and 1536x896 on ltx-2.3 video unless the user asks for something else; the model's own default is small and reads soft.
-Never put URLs in params — the client injects ref URLs. Write the generation prompt yourself: concrete, cinematic, specific.`;
+The params schema beside the exact selected pair is authoritative. Send only declared fields and honor required, enum, min, and max. Put exact Media keys—not URLs or local paths—into path-or-url fields. Use refs only for legacy plans where the schema has one unambiguous compatible path field. Keep control_image distinct from identity/reference images, control_video distinct from ordinary video, and restoration distinct from video generation. Write generation prompts yourself: concrete, cinematic, specific.`;
 }
 
-function parsePlan(content: string): JobPlan {
+/** Walk a model reply and pull out the first balanced top-level object.
+ *  `JSON.parse` on `text[start..end]` dies on replies where the model wrote
+ *  unescaped double quotes inside a string value (the "naked breasts" bug:
+ *  Expected ',' or '}' after property value), and `lastIndexOf("}")` grabs a
+ *  trailing `}` from a code fence. A depth-counting walk stops at the first
+ *  depth-0 `}` that truly closes the object. */
+function jsonSlice(text: string): string {
+  let start = text.indexOf("{");
+  if (start === -1) return "";
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return "";
+}
+
+/** True if the reply carries a top-level JSON object the planner needs. */
+export function hasJsonObject(text: string): boolean {
+  return jsonSlice(text) !== "";
+}
+
+export function parsePlan(content: string): JobPlan {
   let text = content.trim();
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fence) text = fence[1].trim();
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start === -1 || end <= start) throw new Error("copilot: no JSON plan in reply");
-  const obj = JSON.parse(text.slice(start, end + 1));
+  const slice = jsonSlice(text);
+  let obj: JobPlan;
+  if (!slice) {
+    // The model ignored the "JSON only" instruction and answered in prose.
+    // Salvage it as a say-only plan instead of failing the whole turn.
+    obj = { say: text };
+  } else {
+    try {
+      obj = JSON.parse(slice) as JobPlan;
+    } catch {
+      // The model broke JSON rules (unescaped quote inside a string value).
+      // Salvage `say` as the answer instead of failing the whole turn.
+      const m = /"say"\s*:\s*"/.exec(slice);
+      let say = "";
+      if (m) {
+        const start = m.index + m[0].length;
+        // The value ends at the first `",` — the quote that closes it before
+        // the next key. A value that still carries escapes decodes via a
+        // single-string JSON parse; one that carries raw quotes falls back
+        // to the raw text.
+        const end = slice.indexOf('",', start);
+        const raw = slice.slice(start, end === -1 ? slice.lastIndexOf('"') : end);
+        try {
+          say = JSON.parse(`"${raw}"`);
+        } catch {
+          say = raw;
+        }
+      }
+      obj = { say };
+    }
+  }
   if (typeof obj.say !== "string") obj.say = "";
   if (obj.ask && typeof obj.ask.question !== "string") delete obj.ask;
   if (obj.ask) obj.ask.options = Array.isArray(obj.ask.options) ? obj.ask.options.filter((o: unknown) => typeof o === "string").slice(0, 4) : [];
@@ -140,12 +195,22 @@ export async function requestJobPlan(
   brief = "Storyboard: not loaded.",
   history: ChatMessage[] = [],
 ): Promise<JobPlan> {
-  const content = await chatCompletion(apiKey, [
+  const base: ChatMessage[] = [
     { role: "system", content: systemPrompt(models, media, brief) },
     ...history,
     { role: "user", content: userText },
+  ];
+  const first = await chatCompletion(apiKey, base);
+  if (hasJsonObject(first)) return parsePlan(first);
+  // The reply was prose-only — nudge once with the JSON-only rule made
+  // explicit, then parse the retry (which may still be prose; parsePlan
+  // salvages it as a say-only plan rather than throwing).
+  const retry = await chatCompletion(apiKey, [
+    ...base,
+    { role: "assistant", content: first },
+    { role: "user", content: "Reply with ONLY the JSON object — no prose, no code fences." },
   ]);
-  return parsePlan(content);
+  return parsePlan(retry);
 }
 
 /** PLANNER role. Turns a goal into a contract — what "done" looks like — before
@@ -156,7 +221,7 @@ export async function proposeContract(
   models: JobModel[],
   goal: string,
 ): Promise<{ contract: Contract; job: { model: string; endpoint: string; params: Record<string, unknown> } | null }> {
-  const modelLines = models.map((m) => `- ${m.model} · ${m.endpoint} (${m.credits} cr) — ${m.note || ""}`).join("\n");
+  const modelLines = models.map((m) => `- ${m.model}.${m.endpoint} (${m.credits} cr) params=${JSON.stringify(m.params || {})} — ${m.note || ""}`).join("\n");
   const raw = await chatCompletion(apiKey, [
     {
       role: "system",
@@ -257,25 +322,30 @@ Be specific and concrete. Do not invent problems: if it matches the request, say
   }
 }
 
-// Inject ref URLs into params the way each endpoint expects.
+// Inject legacy `refs` into the path fields declared by the selected live
+// schema. New actions should put exact Media keys in those fields directly;
+// this compatibility path keeps older chat plans working without endpoint
+// name switches.
 export function injectRefs(
-  endpoint: string,
+  entry: JobModel,
   params: Record<string, unknown>,
   refs: MediaObject[],
 ): Record<string, unknown> {
-  const imgs = refs.filter((r) => r.content_type.startsWith("image/")).map((r) => r.url);
-  const auds = refs.filter((r) => r.content_type.startsWith("audio/")).map((r) => r.url);
-  const vids = refs.filter((r) => r.content_type.startsWith("video/")).map((r) => r.url);
   const p = { ...params };
-  if (endpoint === "edit" && imgs[0]) p.image = imgs[0];
-  if (endpoint === "multi_reference" && imgs.length) p.images = imgs.slice(0, 4);
-  if (endpoint === "lipsync") {
-    if (imgs[0]) p.image = imgs[0];
-    if (auds[0]) p.audio = auds[0];
-  }
-  if (endpoint === "enhance") {
-    if (vids[0]) p.control_video = vids[0];
-    if (imgs[0]) p.reference_sheet = imgs[0];
+  const pathFields = Object.entries(entry.params || {}).filter(([, schema]) =>
+    schema.type === "path-or-url" || schema.type === "list-of-path-or-url",
+  );
+  for (const kind of ["image", "video", "audio"] as const) {
+    const compatible = refs.filter((ref) => mediaKind(ref) === kind);
+    if (!compatible.length) continue;
+    const fields = pathFields.filter(([name]) => pathParamKind(name) === kind && p[name] === undefined);
+    if (fields.length > 1) {
+      throw new Error(`map ${kind} Media explicitly: ${fields.map(([name]) => name).join(" or ")}`);
+    }
+    const [field] = fields;
+    if (!field) continue;
+    const [name, schema] = field;
+    p[name] = schema.type === "list-of-path-or-url" ? compatible.map((ref) => ref.key) : compatible[0].key;
   }
   return p;
 }

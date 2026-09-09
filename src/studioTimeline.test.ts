@@ -11,9 +11,11 @@ const {
   addClip,
   addTrack,
   buildStudioExportPlan,
+  createMediaClipSet,
   createStudioClip,
   duplicateClip,
   emptyStudioTimeline,
+  fadeGainAt,
   loadStudioTimeline,
   moveClip,
   moveClipToTrack,
@@ -24,8 +26,11 @@ const {
   removeClip,
   reorderTrack,
   reconcileStudioTimeline,
+  repairTrackOverlaps,
+  rippleMoveClip,
   rippleRemoveClip,
   saveStudioTimeline,
+  sharedInsertionStart,
   splitClip,
   studioTimelineEnd,
   trimClip,
@@ -58,6 +63,8 @@ const video = (id: string, start: number, duration = 10) => ({
   sourceDuration: duration,
   volume: 1,
   muted: false,
+  fadeIn: 0,
+  fadeOut: 0,
 });
 
 test("studio timeline seeds canonical beats and preserves user edits", () => {
@@ -81,7 +88,11 @@ test("studio timeline respects suppressed linked clips", () => {
 });
 
 test("studio timeline picks the topmost active visual and computes the edit end", () => {
-  const doc = reconcileStudioTimeline(emptyStudioTimeline(), [beat("a", 0), beat("b", 5)]);
+  const tracks = addTrack(emptyStudioTimeline(), "video");
+  const doc = reconcileStudioTimeline(tracks, [
+    { ...beat("a", 0), trackId: "video-2" },
+    { ...beat("b", 5), trackId: "video-1" },
+  ]);
   expect(activeVisualClip(doc.clips, 7)?.id).toBe("beat:b");
   expect(studioTimelineEnd(doc)).toBe(15);
 });
@@ -133,6 +144,115 @@ test("timeline mutations move, trim, add, and remove without mutating the input"
   expect(original.clips).toHaveLength(1);
 });
 
+test("same-track edits ripple instead of overlapping and can insert between beats", () => {
+  let doc = addClip(emptyStudioTimeline(), video("a", 0, 10));
+  doc = addClip(doc, video("c", 10, 10));
+  doc = addClip(doc, video("b", 10, 4));
+  expect(doc.clips.map(({ id, start }) => ({ id, start })).sort((a, b) => a.start - b.start)).toEqual([
+    { id: "a", start: 0 },
+    { id: "b", start: 10 },
+    { id: "c", start: 14 },
+  ]);
+
+  doc = rippleMoveClip(doc, "c", 10);
+  expect(doc.clips.map(({ id, start }) => ({ id, start })).sort((a, b) => a.start - b.start)).toEqual([
+    { id: "a", start: 0 },
+    { id: "c", start: 10 },
+    { id: "b", start: 20 },
+  ]);
+
+  const audio = (id: string, start: number, duration: number) => ({
+    ...video(id, start, duration),
+    kind: "audio" as const,
+    contentType: "audio/wav",
+    trackId: "audio-1",
+  });
+  let sounds = addClip(emptyStudioTimeline(), audio("voice", 0, 10));
+  sounds = addClip(sounds, audio("music", 5, 3));
+  expect(sounds.clips.map(({ id, start }) => ({ id, start }))).toEqual([
+    { id: "voice", start: 0 },
+    { id: "music", start: 10 },
+  ]);
+});
+
+test("legacy overlaps are repaired per track without disturbing stacked tracks", () => {
+  let doc = addTrack(emptyStudioTimeline(), "video");
+  doc = normalizeStudioTimeline({
+    ...doc,
+    clips: [
+      video("primary", 0, 10),
+      video("overlap", 5, 4),
+      { ...video("overlay", 5, 4), trackId: "video-2" },
+    ],
+  });
+  const repaired = repairTrackOverlaps(doc);
+  expect(repaired.clips.find((clip) => clip.id === "overlap")?.start).toBe(10);
+  expect(repaired.clips.find((clip) => clip.id === "overlay")?.start).toBe(5);
+});
+
+test("linked media finds one clear insertion point across its video and audio tracks", () => {
+  let doc = addClip(emptyStudioTimeline(), video("v1", 0, 10));
+  doc = addClip(doc, video("v2", 10, 10));
+  doc = addClip(doc, {
+    ...video("voice", 5, 10),
+    kind: "audio",
+    contentType: "audio/wav",
+    trackId: "audio-1",
+  });
+  expect(sharedInsertionStart(doc, ["video-1", "audio-1"], 5)).toBe(20);
+});
+
+test("an MP4 asset creates independently editable linked video and audio clips", () => {
+  let doc = addTrack(emptyStudioTimeline(), "video");
+  doc = addTrack(doc, "audio");
+  const pair = createMediaClipSet(
+    {
+      origin: "library",
+      sourceId: "media:take",
+      name: "take.mp4",
+      url: "https://media.example/take.mp4",
+      contentType: "video/mp4",
+      kind: "video",
+    },
+    12,
+    8,
+    "video-2",
+    "audio-2",
+  );
+  expect(pair).toHaveLength(2);
+  expect(pair[0]).toMatchObject({ kind: "video", trackId: "video-2", start: 12, muted: true });
+  expect(pair[1]).toMatchObject({ kind: "audio", trackId: "audio-2", start: 12, muted: false });
+  expect(pair[0].linkGroupId).toBe(pair[1].linkGroupId);
+
+  doc = addClip(addClip(doc, pair[0]), pair[1]);
+  const withoutVideo = removeClip(doc, pair[0].id);
+  expect(withoutVideo.clips).toHaveLength(1);
+  expect(withoutVideo.clips[0].kind).toBe("audio");
+});
+
+test("clip fades shape preview gain and survive export with track level", () => {
+  let doc = addClip(emptyStudioTimeline(), { ...video("still", 0, 10), kind: "image", contentType: "image/png" });
+  doc = addClip(doc, {
+    ...video("voice", 0, 10),
+    kind: "audio",
+    contentType: "audio/wav",
+    trackId: "audio-1",
+    volume: 0.8,
+    fadeIn: 2,
+    fadeOut: 2,
+  });
+  doc = patchTrack(doc, "audio-1", { volume: 0.5 });
+  doc = { ...doc, masterVolume: 0.5 };
+  const clip = doc.clips.find((item) => item.id === "voice")!;
+  expect(fadeGainAt(clip, 0)).toBe(0);
+  expect(fadeGainAt(clip, 1)).toBeCloseTo(0.5);
+  expect(fadeGainAt(clip, 5)).toBe(1);
+  expect(fadeGainAt(clip, 9)).toBeCloseTo(0.5);
+  const result = buildStudioExportPlan(doc);
+  expect(result.ok).toBe(true);
+  if (result.ok) expect(result.plan.clips.find((item) => item.kind === "audio")).toMatchObject({ volume: 0.2, fadeIn: 2, fadeOut: 2 });
+});
+
 test("tracks can be added, renamed, reordered, locked, and removed without losing clips", () => {
   let doc = addTrack(emptyStudioTimeline(), "video");
   const second = doc.tracks.find((track) => track.id === "video-2")!;
@@ -165,9 +285,10 @@ test("duplicate, nudge, and ripple delete preserve source alignment", () => {
   doc = duplicateClip(doc, "a");
   expect(doc.clips.at(-1)).toMatchObject({ id: "a:copy", start: 4, duration: 4 });
   doc = nudgeClip(doc, "a:copy", 0.1);
-  expect(doc.clips.at(-1)?.start).toBeCloseTo(4.1);
+  expect(doc.clips.at(-1)?.start).toBe(4);
   doc = rippleRemoveClip(doc, "a");
-  expect(doc.clips.find((clip) => clip.id === "b")?.start).toBe(0);
+  expect(doc.clips.find((clip) => clip.id === "a:copy")?.start).toBe(0);
+  expect(doc.clips.find((clip) => clip.id === "b")?.start).toBe(4);
 });
 
 test("removing linked media suppresses reseeding", () => {

@@ -1,7 +1,7 @@
 // Unit checks for the pure feature modules: readiness score, prompt pack,
 // final-prompt templating, preview cut, and the camera solve on synthetic frames.
 // Run: bun test src/features.test.ts
-import { expect, test } from "bun:test";
+import { expect, mock, test } from "bun:test";
 
 // localStorage shim (pipeline/api import it at module scope)
 const mem = new Map<string, string>();
@@ -12,13 +12,30 @@ const mem = new Map<string, string>();
 };
 
 const { beatReadiness, boardReadiness, bandOf } = await import("./readiness");
-const { buildFinalPrompt, emptyExt, pickModel } = await import("./pipeline");
+const {
+  assignBeatCast,
+  assignBeatGeography,
+  assignBeatLocation,
+  beatRefs,
+  buildFinalPrompt,
+  emptyExt,
+  genImage,
+  geographyIssues,
+  geographyPrompt,
+  pickModel,
+  setWorldLayout,
+  upsertCharacter,
+  voiceFor,
+  upsertLocation,
+} = await import("./pipeline");
 const { promptPackMarkdown, shotBible } = await import("./promptPack");
 const { solveCameraMotion, describeCameraMove, normalizeReferenceVideoUrl } = await import("./cameraSolve");
 const { kindOf } = await import("./shared");
 const { consumeCharacter, loadHeadCharacter, rememberHeadCharacter, sendCharacter } = await import("./characterHandoff");
 const { consumeStudioAssets, queueStudioAsset } = await import("./studioHandoff");
+const { consumeStageProp, sendPropToStage } = await import("./stageHandoff");
 const { injectRefs } = await import("./copilot");
+const { imageEditPlan } = await import("./shots");
 type Shot = import("./api").Shot;
 type Pipeline = import("./pipeline").Pipeline;
 type GrayFrame = import("./cameraSolve").GrayFrame;
@@ -33,6 +50,7 @@ test("reference video URLs reject executable and non-video schemes", () => {
 test("VRMs are models and character handoffs carry identity, persona, and voice", () => {
   expect(kindOf("model/vrm", "ranger.vrm")).toBe("model");
   expect(kindOf("application/octet-stream", "https://media.example/ranger.vrm?x=1")).toBe("model");
+  expect(kindOf("model/gltf-binary", "https://media.example/prop.glb")).toBe("model");
   const ranger = {
     id: "char:ranger",
     name: "Ranger",
@@ -64,59 +82,103 @@ test("Animation takes queue once for the matching Studio project", () => {
   expect(consumeStudioAssets("project-a")).toEqual([]);
 });
 
+test("Media GLBs hand off to Stage once with their persisted URL", () => {
+  sendPropToStage({ name: "throne.glb", url: "https://media.example/throne.glb" });
+  expect(consumeStageProp()).toEqual({ name: "throne.glb", url: "https://media.example/throne.glb" });
+  expect(consumeStageProp()).toBeNull();
+});
+
 test("pose-controlled LTX is routed separately from ordinary video", () => {
   const models = [
-    { model: "ltx-2.3", endpoint: "multi_reference", credits: 750, note: "keyframe video" },
-    { model: "ltx-enhance", endpoint: "enhance", credits: 1000, note: "Union-Control pose video" },
+    { model: "ltx-2.3", endpoint: "multi_reference", credits: 750, note: "keyframe video", result_ext: ".mp4", params: { images: { type: "list-of-path-or-url" as const } } },
+    { model: "ltx-enhance", endpoint: "enhance", credits: 1000, note: "Union-Control pose video", result_ext: ".mp4", params: { control_video: { type: "path-or-url" as const } } },
   ];
   expect(pickModel(models, "video")?.model).toBe("ltx-2.3");
   expect(pickModel(models, "motion_video")?.model).toBe("ltx-enhance");
 });
 
-test("a beat with no still renders text→video, never an empty keyframe list", () => {
+test("a still to animate picks the reference endpoint and text uses the catalog default", () => {
   const models = [
-    { model: "ltx-2.3", endpoint: "generate", credits: 500, note: "LTX-Video text→video mp4" },
-    { model: "ltx-2.3", endpoint: "multi_reference", credits: 750, note: "1-4 reference images → video mp4" },
+    { model: "ltx-2.3", endpoint: "generate", default: true, credits: 500, note: "LTX-Video text→video mp4", result_ext: ".mp4", params: { prompt: { type: "str" as const } } },
+    { model: "ltx-2.3", endpoint: "multi_reference", credits: 750, note: "1-4 reference images → video mp4", result_ext: ".mp4", params: { images: { type: "list-of-path-or-url" as const } } },
   ];
-  // with a still to animate, the keyframe endpoint; without one, plain text→video
-  expect(pickModel(models, "video")?.endpoint).toBe("multi_reference");
-  expect(pickModel(models, "video_text")?.endpoint).toBe("generate");
+  expect(pickModel(models, "video")).toMatchObject({ model: "ltx-2.3", endpoint: "multi_reference" });
+  expect(pickModel(models, "video_text")).toMatchObject({ model: "ltx-2.3", endpoint: "generate" });
 });
 
-test("mage-flow wins generation and edit even when flux2-dev's notes say 'image'", () => {
-  // flux2-dev listed first, notes containing "reference-image" — the substring
-  // "mage" inside "image" must not count as a Mage match
-  const models = [
-    { model: "flux2-dev", endpoint: "generate", credits: 50, note: "FLUX.2-dev 32B text→image" },
-    { model: "flux2-dev", endpoint: "edit", credits: 50, note: "single reference-image edit" },
-    { model: "mage-flow", endpoint: "generate", credits: 15, note: "Mage-Flow-Turbo 4-step text→image" },
-    { model: "mage-flow-edit", endpoint: "edit", credits: 25, note: "Mage-Flow-Edit-Turbo instruction-based edit" },
-  ];
-  expect(pickModel(models, "image")?.model).toBe("mage-flow");
-  expect(pickModel(models, "image_edit")?.model).toBe("mage-flow-edit");
-  // without mage on the account, flux2-dev remains the pick
-  const fluxOnly = models.slice(0, 2);
-  expect(pickModel(fluxOnly, "image")?.model).toBe("flux2-dev");
-  expect(pickModel(fluxOnly, "image_edit")?.model).toBe("flux2-dev");
+test("closed historical model ids are not client-side fallbacks", () => {
+  const models = [{ model: "ltx-2.3", endpoint: "generate", credits: 500, note: "LTX-Video text→video mp4" }];
+  expect(pickModel(models, "video_text")).toMatchObject({ model: "ltx-2.3", endpoint: "generate" });
+  expect(models.some((model) => model.model === "minimax-h3" || model.model === "flux2-dev")).toBe(false);
 });
 
-test("reference renders go to qwen, never to the mage edit that blanks on 2+ refs", () => {
-  // the live notes verbatim — mage's names qwen, and qwen's model id ends in
-  // "image", so a note-matching or unanchored picker lands on the wrong model
+test("a prompt's own negative canon is not read as introducing the thing it bans", () => {
+  const pipe = addCanonicalWorld(basePipe());
+  const banned = (prompt: string) =>
+    geographyIssues(shot("b", { prompt }), pipe).filter((i) => i.startsWith("prompt introduces"));
+  // every v7 prompt ends with its own ban list — that must stay clean
+  expect(banned("Dawn over the green valley; no desert, fortress, or invented landmarks.")).toEqual([]);
+  expect(banned("Warm communal life, never parent coding; no desert, fortress, bells, banners.")).toEqual([]);
+  // an actual violation still trips it
+  expect(banned("A looming fortress above the trail.")).toEqual(['prompt introduces forbidden geography "fortress"']);
+});
+
+// The v6 regression: three consecutive clips rendered through `ltx-2.3.generate`
+// with zero references, so "Oban" came back a grey ogre, then a golden lion.
+// genImage is the single chokepoint every render goes through — no UI path,
+// script, or future caller can reach a paid job around these two throws.
+test("a video render without references is refused", async () => {
+  const models = [{ model: "ltx-2.3", endpoint: "generate", credits: 500, note: "LTX-Video text→video mp4" }];
+  const ps = { models, apiKey: "k", charge: () => {} } as any;
+  expect(genImage(ps, "a colossal grey brute on a battlefield", { refs: [], video: true })).rejects.toThrow(
+    /must animate a still/,
+  );
+});
+
+test("references handed to an endpoint that cannot take them are refused, not dropped", async () => {
+  // only `generate` on the account: pickModel's fallback returns it even for
+  // "video", and the params block below has no slot for refs — silent drop.
+  const models = [{ model: "ltx-2.3", endpoint: "generate", credits: 500, note: "LTX-Video text→video mp4" }];
+  const ps = { models, apiKey: "k", charge: () => {} } as any;
+  expect(genImage(ps, "Oban holds the line", { refs: ["https://r2/still.png"], video: true })).rejects.toThrow(
+    /takes no reference images/,
+  );
+});
+
+test("catalog defaults choose generation and edit without model-name routing", () => {
   const models = [
-    { model: "flux2-dev", endpoint: "multi_reference", credits: 75, note: "1-4 reference images" },
-    {
-      model: "mage-flow-edit",
-      endpoint: "edit",
-      credits: 25,
-      note: "Mage-Flow-Edit-Turbo instruction-based edit. NOTE: ≥2 images plus a long descriptive prompt reliably returns the content-gate's blank placeholder — use qwen-image.edit for multi-reference work",
+    { model: "first-image", endpoint: "generate", credits: 50, note: "text image", result_ext: ".png" },
+    { model: "preferred-image", endpoint: "generate", default: true, credits: 15, note: "text image", result_ext: ".png" },
+    { model: "preferred-edit", endpoint: "edit", default: true, credits: 25, note: "single image edit", result_ext: ".png", params: { image: { type: "path-or-url" as const } } },
+  ];
+  expect(pickModel(models, "image")?.model).toBe("preferred-image");
+  expect(pickModel(models, "image_edit")?.model).toBe("preferred-edit");
+});
+
+test("single-image edit and reference-image lanes come from parameter signatures", () => {
+  const models = [
+    { model: "single-edit", endpoint: "edit", default: true, credits: 25, note: "single edit", result_ext: ".png", params: { image: { type: "path-or-url" as const } } },
+    { model: "reference-edit", endpoint: "edit", credits: 50, note: "identity references", result_ext: ".png", params: { images: { type: "list-of-path-or-url" as const } } },
+  ];
+  expect(pickModel(models, "image_edit")?.model).toBe("single-edit");
+  expect(pickModel(models, "image_refs")?.model).toBe("reference-edit");
+});
+
+test("re-rendering an existing still keeps its assigned location and identity references", () => {
+  const models = [
+    { model: "single-edit", endpoint: "edit", default: true, credits: 25, note: "single-image edit", result_ext: ".png", params: { image: { type: "path-or-url" as const } } },
+    { model: "reference-edit", endpoint: "edit", credits: 50, note: "multi-reference identity lock", result_ext: ".png", params: { images: { type: "list-of-path-or-url" as const } } },
+  ];
+  expect(imageEditPlan(models, "https://media/beat.png", ["https://media/location.png", "https://media/oban.png"])).toEqual({
+    model: models[1],
+    params: {
+      images: ["https://media/beat.png", "https://media/location.png", "https://media/oban.png"],
     },
-    { model: "qwen-image", endpoint: "edit", credits: 50, note: "Qwen-Image-Edit-2509 multi-reference identity lock" },
-  ];
-  expect(pickModel(models, "image_edit")?.model).toBe("mage-flow-edit");
-  expect(pickModel(models, "image_refs")?.model).toBe("qwen-image");
-  // no qwen on the account → flux2-dev's multi_reference, still not mage
-  expect(pickModel(models.slice(0, 2), "image_refs")?.model).toBe("flux2-dev");
+  });
+  expect(imageEditPlan(models, "https://media/beat.png", [], "  repair the lighting  ")).toEqual({
+    model: models[0],
+    params: { image: "https://media/beat.png", prompt: "repair the lighting" },
+  });
 });
 
 test("MediaPipe landmarks map onto the cskel27 joints the control take draws", async () => {
@@ -187,10 +249,10 @@ test("pose-controlled LTX receives one control video and one identity sheet", ()
     { key: "take", name: "ardy.webm", url: "https://media.example/ardy.webm", content_type: "video/webm", type: "reference", bytes: 1, added: 1 },
     { key: "sheet", name: "hero.png", url: "https://media.example/hero.png", content_type: "image/png", type: "reference", bytes: 1, added: 1 },
   ] as import("./api").MediaObject[];
-  expect(injectRefs("enhance", { prompt: "cinematic hero" }, refs)).toEqual({
+  expect(injectRefs({ model: "motion", endpoint: "enhance", credits: 1, note: "", result_ext: ".mp4", params: { control_video: { type: "path-or-url" }, reference_sheet: { type: "path-or-url" } } }, { prompt: "cinematic hero" }, refs)).toEqual({
     prompt: "cinematic hero",
-    control_video: "https://media.example/ardy.webm",
-    reference_sheet: "https://media.example/hero.png",
+    control_video: "take",
+    reference_sheet: "sheet",
   });
 });
 
@@ -205,13 +267,204 @@ const basePipe = (): Pipeline => ({
   mix: null,
 });
 
-test("readiness: complete beat is ready, empty beat is blocked", () => {
+const addCanonicalWorld = (pipe: Pipeline) => {
+  setWorldLayout(pipe, {
+    name: "Forest road to Spawn Village",
+    description: "One connected landscape: forest to trail to clearing to village.",
+    approved: true,
+    map: { url: "https://media.example/world-map.png", content_type: "image/png" },
+    rules: ["The trail is continuous", "The clearing is the only open staging ground"],
+    forbiddenElements: ["fortress", "battlefield", "bell", "desert", "castle"],
+  });
+  const image = (id: string) => ({ url: `https://media.example/${id}.png`, content_type: "image/png" });
+  upsertLocation(pipe, {
+    id: "forest",
+    name: "Old-growth forest",
+    description: "Dense temperate woods",
+    approved: true,
+    prompt: "same forest",
+    image: image("forest"),
+    sourceBeatId: "beat-01",
+    kind: "zone",
+    mapX: 15,
+    mapY: 50,
+    adjacentTo: ["forest-trail"],
+    allowedElements: ["old trees", "ferns"],
+    forbiddenElements: ["buildings"],
+  });
+  upsertLocation(pipe, {
+    id: "forest-trail",
+    name: "Forest trail",
+    description: "Narrow path and stream crossing",
+    approved: true,
+    prompt: "same trail",
+    image: image("trail"),
+    sourceBeatId: "beat-02",
+    kind: "transition",
+    mapX: 38,
+    mapY: 55,
+    adjacentTo: ["forest", "clearing"],
+    allowedElements: ["footpath", "stream", "boulders"],
+    forbiddenElements: ["monuments"],
+  });
+  upsertLocation(pipe, {
+    id: "clearing",
+    name: "Forest clearing",
+    description: "Natural grass clearing",
+    approved: true,
+    prompt: "same clearing",
+    image: image("clearing"),
+    sourceBeatId: "beat-03",
+    kind: "transition",
+    mapX: 62,
+    mapY: 50,
+    adjacentTo: ["forest-trail", "village"],
+    allowedElements: ["grass", "wildflowers"],
+    forbiddenElements: ["fortifications"],
+  });
+  upsertLocation(pipe, {
+    id: "village",
+    name: "Spawn Village",
+    description: "Small timber-and-stone settlement",
+    approved: true,
+    prompt: "same village",
+    image: image("village"),
+    sourceBeatId: "beat-04",
+    kind: "zone",
+    mapX: 86,
+    mapY: 45,
+    adjacentTo: ["clearing"],
+    allowedElements: ["timber homes", "workshop", "village lane"],
+    forbiddenElements: ["walls", "bell tower"],
+  });
+  return pipe;
+};
+
+test("cast registry upserts by stable id and beat assignment rejects unknown cast", () => {
   const pipe = basePipe();
+  const ryo = upsertCharacter(pipe, {
+    id: "ryo",
+    name: "Ryo",
+    description: "small golden Shiba spawn",
+    approved: true,
+    prompt: "preserve face, markings, age, and proportions",
+    image: { url: "https://media.example/ryo.png", content_type: "image/png" },
+  });
+  expect(ryo.id).toBe("ryo");
+  expect(pipe.characters.map((c) => c.id)).toEqual(["c1", "ryo"]);
+
+  upsertCharacter(pipe, { ...ryo, description: "the exact same small golden Shiba spawn" });
+  expect(pipe.characters.filter((c) => c.id === "ryo")).toHaveLength(1);
+  expect(pipe.characters.find((c) => c.id === "ryo")?.description).toContain("exact same");
+
+  assignBeatCast(pipe, "beat-01", ["ryo", "c1", "ryo"]);
+  expect(pipe.beats["beat-01"].characterIds).toEqual(["ryo", "c1"]);
+  expect(() => assignBeatCast(pipe, "beat-01", ["missing"])).toThrow("unknown character");
+});
+
+test("location registry uses an explicit beat-derived plate as the first render reference", () => {
+  const pipe = addCanonicalWorld(basePipe());
+  const plate = upsertLocation(pipe, {
+    id: "forest-trail",
+    name: "Forest Trail",
+    description: "the path connecting forest, clearing, and village",
+    approved: true,
+    prompt: "preserve the same path, stream crossing, tree line, and light",
+    image: { url: "https://media.example/trail.png", content_type: "image/png" },
+    sourceBeatId: "beat-02",
+    kind: "transition",
+    mapX: 38,
+    mapY: 55,
+    adjacentTo: ["forest", "clearing"],
+    allowedElements: ["footpath", "stream", "boulders"],
+    forbiddenElements: ["fortress", "bell"],
+  });
+  expect(plate.sourceBeatId).toBe("beat-02");
+  assignBeatLocation(pipe, "beat-09", "forest-trail");
+  const ext = pipe.beats["beat-09"];
+  expect(ext.locationId).toBe("forest-trail");
+  expect(beatRefs(pipe, ext)).toEqual(["https://media.example/trail.png"]);
+
+  ext.characterIds = ["c1"];
+  expect(beatRefs(pipe, ext)).toEqual(["https://media.example/trail.png", "cat.png"]);
+  expect(() => assignBeatLocation(pipe, "beat-09", "missing")).toThrow("unknown location");
+});
+
+test("world topology locks a beat to an adjacent route and bans invented geography", () => {
+  const pipe = addCanonicalWorld(basePipe());
+  const ext = assignBeatGeography(pipe, "beat-02", {
+    locationId: "forest-trail",
+    movement: "cross",
+    screenDirection: "left-to-right",
+    entryFromId: "forest",
+    exitToId: "clearing",
+    anchor: "stream bridge",
+  });
+  expect(ext.locationId).toBe("forest-trail");
+  expect(ext.geography?.exitToId).toBe("clearing");
+  expect(geographyPrompt(pipe, ext)).toContain("Old-growth forest → Forest trail → Forest clearing");
+  expect(geographyPrompt(pipe, ext)).toContain("Never introduce: fortress, battlefield, bell, desert, castle");
+  expect(geographyIssues(shot("beat-02", { prompt: "A bell rings over the fortress battlefield" }), pipe)).toContain(
+    'prompt introduces forbidden geography "fortress"',
+  );
+  expect(() =>
+    assignBeatGeography(pipe, "bad-route", {
+      locationId: "forest",
+      movement: "exit",
+      screenDirection: "left-to-right",
+      exitToId: "village",
+      anchor: "trailhead",
+    }),
+  ).toThrow("not adjacent");
+});
+
+test("a saved project mirrors pipeline cast state into the canonical document", async () => {
+  const { activeProjectPipeline, closeProject, flushActiveProjectPipeline, openProject, saveActiveProjectPipeline } = await import("./api");
+  const writes: any[] = [];
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (!init?.method) {
+      return Response.json({
+        id: "project-cast",
+        owner: "0xowner",
+        title: "Cast film",
+        rev: 7,
+        createdAt: 1,
+        updatedAt: 1,
+        doc: { id: "project-cast", address: "0xowner", title: "Cast film", rev: 7, shots: [], tracks: [], playhead: 0, createdAt: 1, updatedAt: 1 },
+      });
+    }
+    writes.push(JSON.parse(String(init.body)));
+    return Response.json({ ok: true });
+  }) as typeof fetch;
+
+  await openProject("secret", "project-cast");
+  const pipeline = basePipe();
+  expect(saveActiveProjectPipeline("project-cast", pipeline)).toBe(true);
+  pipeline.characters.push({ id: "c2", name: "Dog", description: "", approved: true, prompt: "", image: null });
+  expect(saveActiveProjectPipeline("project-cast", pipeline)).toBe(true);
+  expect(activeProjectPipeline("project-cast")).toEqual(pipeline);
+  await flushActiveProjectPipeline();
+  expect(writes).toHaveLength(2);
+  expect(writes[0].doc.pipeline.characters[0].name).toBe("Cat");
+  expect(writes[1].doc.pipeline.characters.map((character: any) => character.name)).toEqual(["Cat", "Dog"]);
+  closeProject();
+});
+
+test("readiness: complete beat is ready, empty beat is blocked", () => {
+  const pipe = addCanonicalWorld(basePipe());
   pipe.beats["a"] = {
     ...emptyExt(),
     characterIds: ["c1"],
     tracers: [{ id: "t1", characterId: "c1", kind: "move", path: [{ t: 0, x: 0.1, y: 0.5 }, { t: 8, x: 0.9, y: 0.5 }] }],
   };
+  assignBeatGeography(pipe, "a", {
+    locationId: "forest-trail",
+    movement: "cross",
+    screenDirection: "left-to-right",
+    entryFromId: "forest",
+    exitToId: "clearing",
+    anchor: "stream bridge",
+  });
   const full = beatReadiness(shot("a"), pipe);
   expect(full.score).toBe(100);
   expect(full.band).toBe("ready");
@@ -239,10 +492,24 @@ test("readiness: speech tracer without voice docks the voice component", () => {
   expect(r.components.find((c) => c.key === "voice")!.value).toBe(0);
   pipe.beats["a"].voices = { t1: { url: "v.wav", content_type: "audio/wav" } };
   expect(beatReadiness(shot("a"), pipe).components.find((c) => c.key === "voice")!.value).toBe(1);
+  // …and a spoken line is not blocking: it must never satisfy motion direction,
+  // or seeding a VO script would silently mark frozen-tableau beats as ready.
+  expect(beatReadiness(shot("a"), pipe).components.find((c) => c.key === "tracers")!.value).toBe(0);
+  pipe.beats["a"].tracers.push({ id: "t2", characterId: "c1", kind: "move", path: [{ t: 0, x: 0.1, y: 0.5 }] });
+  expect(beatReadiness(shot("a"), pipe).components.find((c) => c.key === "tracers")!.value).toBe(1);
 });
 
-test("final prompt: motion + camera + intent instruction fold in", () => {
+test("readiness: an intentionally cast-free insert is complete without adding identity refs", () => {
   const pipe = basePipe();
+  pipe.beats["a"] = { ...emptyExt(), castIntentionalEmpty: true };
+  const cast = beatReadiness(shot("a"), pipe).components.find((component) => component.key === "cast")!;
+  expect(cast.value).toBe(1);
+  expect(cast.hint).toContain("intentionally");
+  expect(pipe.beats["a"].characterIds).toEqual([]);
+});
+
+test("final prompt: geography + motion + camera + intent instruction fold in", () => {
+  const pipe = addCanonicalWorld(basePipe());
   const ext = {
     ...emptyExt(),
     characterIds: ["c1"],
@@ -252,26 +519,39 @@ test("final prompt: motion + camera + intent instruction fold in", () => {
     ],
     refIntent: "camera-only" as const,
     cameraMove: "Camera: slow push-in over 4.0s",
+    locationId: "forest-trail",
+    geography: {
+      movement: "cross" as const,
+      screenDirection: "left-to-right" as const,
+      entryFromId: "forest",
+      exitToId: "clearing",
+      anchor: "stream bridge",
+    },
   };
-  const p = buildFinalPrompt("a cat crosses the street", ext, pipe.characters);
+  const p = buildFinalPrompt("a cat crosses the street", ext, pipe);
   expect(p).toContain("a cat crosses the street");
   expect(p).toContain("Cat moves from frame left to frame right");
   expect(p).toContain('Cat says "meow" at 2.5s');
   expect(p).toContain("slow push-in");
   expect(p).toContain("Preserve only the camera movement");
+  expect(p).toContain("World geography is locked");
+  expect(p).toContain("Old-growth forest → Forest trail → Forest clearing");
+  expect(p).toContain("Never introduce: fortress, battlefield, bell, desert, castle");
   expect(p).toContain("10 second cinematic shot");
 });
 
-test("prompt pack: markdown + bible carry beats, cast, speech", () => {
+test("prompt pack: markdown + bible carry beats, cast, speech, and master narration cues", () => {
   const pipe = basePipe();
   pipe.beats["a"] = {
     ...emptyExt(),
     characterIds: ["c1"],
+    audioCues: [{ at: 0.35, speaker: "RYO", text: "My name is Ryo." }],
     tracers: [{ id: "t2", characterId: "c1", kind: "speech", text: "meow", path: [{ t: 2.5, x: 0.5, y: 0.5 }] }],
   };
   const sb = { id: "x", title: "My Film", shots: [shot("a")], rev: 1 } as any;
   const bible = shotBible(sb, pipe);
   expect(bible.beats[0].cast).toEqual(["Cat"]);
+  expect(bible.beats[0].narration[0]).toEqual({ at: 0.35, speaker: "RYO", text: "My name is Ryo." });
   expect(bible.beats[0].speech[0].line).toBe("meow");
   expect(bible.runtimeSeconds).toBe(10);
   const md = promptPackMarkdown(sb, pipe);
@@ -279,6 +559,7 @@ test("prompt pack: markdown + bible carry beats, cast, speech", () => {
   expect(md).toContain("**Cat**");
   expect(md).toContain("a cat crosses the street");
   expect(md).toContain('🔊 "meow" @ 2.5s');
+  expect(md).toContain('🎙 RYO @ 0.3s — "My name is Ryo."');
 });
 
 /* ── camera solve on synthetic frames ── */
@@ -366,4 +647,125 @@ test("the work loop scores, converges, restarts, and always has a way out", asyn
   expect(decide(run([at(1, 0.3, "f", 180)]), 50).why).toContain("ceiling");
   // an evaluator with no repair to offer must not loop forever
   expect(decide(run([at(1, 0.4, "")]), 50)).toEqual({ action: "stop", why: "the evaluator had no repair to suggest" });
+});
+
+test("parsePlan survives a broken reply (the 'That didn't work' bug)", async () => {
+  const { parsePlan } = await import("./copilot");
+
+  // valid JSON still parses into a full plan
+  const plan = parsePlan('{"say":"Make a dawn keyframe","job":{"model":"flux-schnell","endpoint":"generate","params":{"prompt":"dawn keyframe"},"refs":["media:ranger.png"]}}');
+  expect(plan.say).toBe("Make a dawn keyframe");
+  expect(plan.job).toEqual({ model: "flux-schnell", endpoint: "generate", params: { prompt: "dawn keyframe" }, refs: ["media:ranger.png"] });
+
+  // the model wrote an unescaped quote inside `say` — "naked breasts" case:
+  // the reply's JSON is invalid, but the answer text is still salvageable.
+  const broken = parsePlan('{"say":"Render "naked breasts" as asked.","job":{"model":"flux-schnell","endpoint":"generate","params":{"prompt":"naked breasts"}}}');
+  expect(broken.say).toContain("Render");
+  expect(broken.say).toContain("as asked");
+  expect(broken.job).toBeUndefined();
+
+  // the model answered in plain prose (no JSON object at all) — no throw;
+  // the prose is kept as a say-only plan
+  const prose = parsePlan("Photorealistic it is: I will render that with LTX-2.3, 1536x896, 240 frames.");
+  expect(prose.say).toContain("Photorealistic it is");
+  expect(prose.job).toBeUndefined();
+  expect(prose.ask).toBeUndefined();
+});
+
+test("requestJobPlan retries once when the reply lacks a JSON object", async () => {
+  const calls: import("./api").ChatMessage[][] = [];
+  const replies = [
+    "I will render that with LTX-2.3 at 1536x896, 240 frames at 24fps. That is a 10-second clip.",
+    '{"say":"Rendering a 10s photorealistic bouncing-breasts clip.","job":{"model":"ltx-2.3","endpoint":"generate","params":{"prompt":"photorealistic breasts bouncing, 1536x896"},"refs":[]}}',
+  ];
+  mock.module("./api", () => ({
+    chatCompletion: async (_k: string, msgs: import("./api").ChatMessage[]) => {
+      calls.push(msgs);
+      return replies[calls.length - 1];
+    },
+  } as any));
+  const { requestJobPlan, hasJsonObject } = await import("./copilot");
+  const models: import("./api").JobModel[] = [
+    { model: "ltx-2.3", endpoint: "generate", credits: 80, note: "text-to-video" },
+  ];
+  const plan = await requestJobPlan("sk-test", models, [], "bouncing naked breasts video", "Storyboard: empty — no beats yet.");
+  expect(calls.length).toBe(2); // retried once after the prose reply
+  const last = calls[1];
+  expect(last[last.length - 1].role).toBe("user");
+  expect(String(last[last.length - 1].content)).toContain("ONLY the JSON object");
+  expect(hasJsonObject("I will render that with LTX-2.3 at 1536x896.")).toBe(false);
+  expect(hasJsonObject('{"say":"x"}')).toBe(true);
+  expect(plan.job?.model).toBe("ltx-2.3");
+  expect(plan.say).toContain("photorealistic");
+});
+
+test("a character keeps one voice across lines, and survives an evicted id", async () => {
+  const { speakAs, voiceFor, isVoiceGone } = await import("./pipeline");
+  const pipe = basePipe();
+  const scout = upsertCharacter(pipe, {
+    id: "scout",
+    name: "Scout",
+    description: "weathered",
+    approved: true,
+    prompt: "",
+    voice: "  older man, gravelly and unhurried  ",
+    image: null,
+  });
+  expect(scout.voice).toBe("older man, gravelly and unhurried");
+  // nothing minted yet, so nothing to speak with
+  expect(voiceFor(pipe, "scout")).toBeUndefined();
+  expect(voiceFor(pipe, null)).toBeUndefined();
+
+  const sent: any[] = [];
+  let mints = 0;
+  let evicted = false;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: any, init: any) => {
+    const body = JSON.parse(init.body);
+    if (String(url).endsWith("/api/v1/voice")) {
+      mints++;
+      // the server content-addresses the clip: the same clip mints the same id
+      return new Response(JSON.stringify({ voice_id: "v_scout", reference_audio: "CLIP" }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+    sent.push(body);
+    if (evicted) return new Response("gone", { status: 404 });
+    return new Response(JSON.stringify({ url: "https://cdn/line.wav" }), {
+      headers: { "content-type": "application/json" },
+    });
+  }) as any;
+
+  try {
+    const ps: any = { apiKey: "k", models: [] };
+    const mut = (fn: any) => fn(pipe);
+
+    await speakAs(ps, pipe, "scout", "Ridge is steeper than it looks.", mut);
+    // minting stores BOTH halves: the id to speak with, the clip to recover with
+    expect(pipe.characters.find((c) => c.id === "scout")!.voiceId).toBe("v_scout");
+    expect(pipe.characters.find((c) => c.id === "scout")!.voiceClip).toBe("CLIP");
+    expect(sent[0]).toEqual({ text: "Ridge is steeper than it looks.", voice_id: "v_scout" });
+
+    // a second line is the whole point: same id, and no second mint
+    await speakAs(ps, pipe, "scout", "Camp is an hour out.", mut);
+    expect(sent[1]).toEqual({ text: "Camp is an hour out.", voice_id: "v_scout" });
+    expect(mints).toBe(1);
+
+    // server restarted and dropped the id: re-mint from the clip, same voice
+    evicted = true;
+    sent.length = 0;
+    await expect(speakAs(ps, pipe, "scout", "Still here.", mut)).rejects.toThrow();
+    expect(isVoiceGone(new Error("tts: 404"))).toBe(true);
+    expect(mints).toBe(2); // it did try to recover before giving up
+    expect(sent.every((b) => b.voice_id === "v_scout")).toBe(true);
+
+    // no design written = the model default, never a drifting description
+    evicted = false;
+    sent.length = 0;
+    upsertCharacter(pipe, { ...scout, voice: "" });
+    await speakAs(ps, pipe, "scout", "Anyone.", mut);
+    expect(sent[0]).toEqual({ text: "Anyone." });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

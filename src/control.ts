@@ -14,6 +14,8 @@ export type ControlAction = {
   parameters?: Record<string, unknown>;
   /** Why this action must pause for an explicit click in the copilot rail. */
   confirmation?: string;
+  /** Request-specific confirmation text, used when price or target is dynamic. */
+  confirmationFor?: (params: Record<string, unknown>) => string;
   run: (params?: Record<string, unknown>) => Promise<ControlResult> | ControlResult;
 };
 
@@ -47,6 +49,11 @@ export function actionTools(): ChatTool[] {
 
 export function actionForTool(name: string): ReturnType<typeof listActions>[number] | undefined {
   return listActions().find((action) => toolName(action.name) === name);
+}
+
+export function confirmationForTool(name: string, params: Record<string, unknown>): string | undefined {
+  const action = [...registry.values()].find((candidate) => toolName(candidate.name) === name);
+  return action?.confirmationFor?.(params) ?? action?.confirmation;
 }
 
 export async function callAction(name: string, params?: Record<string, unknown>): Promise<ControlResult> {

@@ -135,6 +135,13 @@
 .bd-chip{ display:flex; align-items:center; gap:6px; font-size:11.5px; color:var(--fg2); border:1px solid var(--border); border-radius:var(--radius-full); padding:4px 10px; cursor:pointer; }
 .bd-chip:has(input:checked){ color:var(--accent); border-color:rgba(74,222,128,.35); background:var(--accent-subtle); }
 .bd-thumb{ width:22px; height:22px; border-radius:var(--radius-sm); background-size:cover; background-position:center; }
+.geo-plan{ margin-top:8px; padding:9px; display:flex; flex-direction:column; gap:8px; border:1px solid rgba(74,222,128,.22); border-radius:var(--radius-md); background:rgba(74,222,128,.035); }
+.geo-plan-head{ display:flex; align-items:center; gap:8px; color:var(--fg2); font-size:11px; }
+.geo-plan-head span{ margin-left:auto; color:var(--accent); font:9px var(--mono); text-transform:uppercase; }
+.geo-plan-grid{ display:grid; grid-template-columns:1fr 1fr; gap:7px; }
+.geo-plan label{ display:flex; flex-direction:column; gap:4px; color:var(--fg3); font-size:10px; }
+.geo-plan select,.geo-plan input{ min-width:0; padding:6px 7px; border:1px solid var(--input); border-radius:var(--radius-sm); background:var(--bg-elevated); color:var(--fg1); font:11px var(--font-body); }
+.geo-issues{ padding:7px 9px; border:1px solid rgba(248,113,113,.3); border-radius:var(--radius-sm); background:rgba(248,113,113,.07); color:#fca5a5; font-size:10.5px; line-height:1.45; }
 .bd-voice{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .bd-voice audio{ height:26px; max-width:220px; }
 
@@ -144,6 +151,9 @@
 .tracer-canvas svg{ position:absolute; inset:0; width:100%; height:100%; touch-action:none; }
 .tracer-tools{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
 .tracer-tools .beat-btn{ flex:0 0 auto; }
+.tracer-surfaces{ display:flex; gap:3px; padding:3px; border:1px solid var(--border); border-radius:7px; background:var(--bg-elevated); }
+.tracer-surfaces button{ padding:4px 7px; border:0; border-radius:5px; background:transparent; color:var(--fg3); font:600 10px var(--font-body); cursor:pointer; }
+.tracer-surfaces button.on{ color:var(--accent); background:var(--accent-subtle); }
 .tracer-sel, .tracer-line{ font:400 11.5px var(--font-body); background:var(--bg-elevated); color:var(--fg1); border:1px solid var(--input); border-radius:var(--radius-sm); padding:5px 8px; }
 .tracer-line{ flex:1; min-width:140px; }
 .tracer-list{ display:flex; flex-wrap:wrap; gap:6px; }
@@ -166,6 +176,21 @@
 .ap-desc{ font:400 11px var(--font-body); min-height:44px; resize:vertical; background:transparent; color:var(--fg2); border:1px solid var(--border); border-radius:var(--radius-sm); padding:5px 7px; }
 .ap-row{ display:flex; align-items:center; gap:6px; }
 .ap-row .beat-btn{ flex:0 0 auto; }
+.world-grid{ display:grid; grid-template-columns:minmax(320px,1.5fr) minmax(220px,1fr); gap:10px; }
+.world-map{ position:relative; min-height:250px; overflow:hidden; display:grid; place-items:center; border:1px solid var(--border); border-radius:var(--radius-md); background:linear-gradient(145deg,var(--forest-deep),var(--bg-muted)) center/cover; color:var(--fg4); font-size:11px; }
+.world-map::after{ content:""; position:absolute; inset:0; background:rgba(2,8,3,.16); pointer-events:none; }
+.world-map>span{ position:relative; z-index:2; padding:20px; text-align:center; }
+.world-map svg{ position:absolute; z-index:3; inset:0; width:100%; height:100%; overflow:visible; }
+.world-map line{ stroke:rgba(255,255,255,.8); stroke-width:.7; stroke-dasharray:2 1; vector-effect:non-scaling-stroke; }
+.world-map circle{ stroke:#fff; stroke-width:.6; vector-effect:non-scaling-stroke; }
+.world-map circle.zone{ fill:var(--accent); }
+.world-map circle.transition{ fill:var(--compass-400); }
+.world-map text{ fill:#fff; stroke:rgba(0,0,0,.85); stroke-width:.65; paint-order:stroke; text-anchor:middle; font:700 3px var(--font-body); }
+.world-fields{ display:flex; flex-direction:column; gap:7px; }
+.danger-field{ border-color:rgba(248,113,113,.28); }
+.location-kind-row .ap-name{ flex:1; min-width:90px; }
+.location-kind-row label{ display:flex; align-items:center; gap:3px; color:var(--fg3); font-size:10px; }
+.location-kind-row input{ width:48px; padding:3px; border:1px solid var(--input); border-radius:4px; background:var(--bg-muted); color:var(--fg1); font:10px var(--mono); }
 .ap-approve{ display:flex; align-items:center; gap:5px; font-size:11px; color:var(--fg2); flex:1; cursor:pointer; }
 .ap-sound{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .ap-sound .beat-btn{ flex:0 0 auto; }
@@ -174,6 +199,7 @@
 .ap-finals{ display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px; }
 .ap-final{ aspect-ratio:16/9; border-radius:var(--radius-sm); border:1px solid var(--border); background:var(--bg-muted) center/cover; width:100%; }
 .ap-final.empty{ display:grid; place-items:center; font-family:var(--mono); font-size:11px; color:var(--fg4); }
+@media (max-width:900px){ .world-grid{ grid-template-columns:1fr; } }
 .gold-btn{ color:var(--compass-400); border-color:rgba(250,204,21,.3); }
 .gold-btn:hover{ background:rgba(250,204,21,.08); }
 /* pick a beat still by looking at it — a filename in a dropdown tells you nothing */

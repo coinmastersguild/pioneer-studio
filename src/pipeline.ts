@@ -2,8 +2,9 @@
 // generation helper. State persists in localStorage per storyboard id.
 // Uses localStorage for local-only projects. The isolated load/save boundary can
 // be replaced with server-backed persistence without changing these data shapes.
-import { API_BASE, authHeaders, blobToDataUrl, captionImage, chatCompletion, submitJob, uploadMedia, type JobModel, type JobStatus, type Shot } from "./api";
+import { activeProjectPipeline, API_BASE, authHeaders, blobToDataUrl, captionImage, chatCompletion, saveActiveProjectPipeline, submitJob, uploadMedia, type JobModel, type JobStatus, type ChatMessage, type Shot } from "./api";
 import { kindOf, type PS } from "./shared";
+import { classifyJobModel, preferredEntry, type JobCapability } from "./jobCatalog";
 import type { StudioExportPlan } from "./studioTimeline";
 
 export type Artifact = { url: string; content_type: string; key?: string };
@@ -13,7 +14,47 @@ export type Character = {
   description: string;
   approved: boolean;
   prompt: string; // extra styling for the driving image, optional
+  voice?: string; // natural-language voice design — how the voice is authored
+  // Minted from `voice`, and the thing that actually holds identity across
+  // lines. The clip is kept so an evicted id can be re-minted to the same id
+  // (the server content-addresses it), which is what makes a saved cast
+  // survive a server restart.
+  voiceId?: string;
+  voiceClip?: string; // base64 reference audio, as /voice returned it
   image: Artifact | null;
+};
+export type LocationKind = "zone" | "transition";
+export type ScreenDirection = "left-to-right" | "right-to-left" | "toward-camera" | "away-camera" | "hold";
+export type BeatMovement = "hold" | "enter" | "cross" | "exit" | "arrive";
+export type WorldLayout = {
+  name: string;
+  description: string;
+  approved: boolean;
+  map: Artifact | null;
+  rules: string[];
+  forbiddenElements: string[];
+};
+export type Location = {
+  id: string;
+  name: string;
+  description: string;
+  approved: boolean;
+  prompt: string;
+  image: Artifact | null;
+  sourceBeatId?: string;
+  kind?: LocationKind;
+  mapX?: number;
+  mapY?: number;
+  adjacentTo?: string[];
+  allowedElements?: string[];
+  forbiddenElements?: string[];
+};
+export type BeatGeography = {
+  movement: BeatMovement;
+  screenDirection: ScreenDirection;
+  entryFromId?: string;
+  exitToId?: string;
+  anchor?: string;
 };
 export type TracerPoint = { t: number; x: number; y: number }; // t in [0,10]s, x/y normalized 0–1
 export type Tracer = {
@@ -22,6 +63,11 @@ export type Tracer = {
   kind: "move" | "speech";
   path: TracerPoint[];
   text?: string;
+};
+export type AudioCue = {
+  at: number; // seconds from the start of this beat
+  speaker: string;
+  text: string;
 };
 // Reference intent — what the final render should preserve from the beat's
 // reference material. An intent label + prompt templating switch, NOT a compute
@@ -38,6 +84,10 @@ export const refIntentOf = (ext: BeatExt): (typeof REF_INTENTS)[number] =>
 
 export type BeatExt = {
   characterIds: string[];
+  locationId?: string;
+  geography?: BeatGeography;
+  audioCues?: AudioCue[]; // authored master-mix narration; never becomes lip sync
+  castIntentionalEmpty?: boolean;
   tracers: Tracer[];
   voices: Record<string, Artifact>; // tracerId → generated voice line
   finalPrompt: string;
@@ -48,6 +98,8 @@ export type BeatExt = {
 };
 export type Pipeline = {
   characters: Character[];
+  locations?: Location[];
+  world?: WorldLayout;
   beats: Record<string, BeatExt>;
   musicPrompt: string;
   music: Artifact | null;
@@ -83,6 +135,11 @@ const KEY = (id: string) => `ps_pipeline_${id}`;
 const pipeMem = new Map<string, Pipeline>();
 
 export function loadPipeline(id: string): Pipeline {
+  const projectPipeline = activeProjectPipeline(id) as Pipeline | undefined;
+  if (projectPipeline) {
+    pipeMem.set(id, structuredClone(projectPipeline));
+    return structuredClone(projectPipeline);
+  }
   const m = pipeMem.get(id);
   if (m) return structuredClone(m);
   try {
@@ -97,6 +154,7 @@ export function loadPipeline(id: string): Pipeline {
   }
   return {
     characters: [],
+    locations: [],
     beats: {},
     musicPrompt: "",
     music: null,
@@ -106,6 +164,7 @@ export function loadPipeline(id: string): Pipeline {
 
 export function savePipeline(id: string, p: Pipeline): void {
   pipeMem.set(id, structuredClone(p)); // full doc for this session, always
+  saveActiveProjectPipeline(id, p);
   try {
     localStorage.setItem(KEY(id), JSON.stringify(p));
     return;
@@ -116,6 +175,8 @@ export function savePipeline(id: string, p: Pipeline): void {
     const strip = (a: Artifact | null) => (a && a.url.startsWith("data:") ? null : a);
     const slim: Pipeline = structuredClone(p);
     slim.characters.forEach((c) => (c.image = strip(c.image)));
+    if (slim.world) slim.world.map = strip(slim.world.map);
+    (slim.locations || []).forEach((location) => (location.image = strip(location.image)));
     for (const b of Object.values(slim.beats)) {
       b.finalClip = strip(b.finalClip);
       b.voices = Object.fromEntries(Object.entries(b.voices).filter(([, v]) => !v.url.startsWith("data:")));
@@ -130,6 +191,219 @@ export function savePipeline(id: string, p: Pipeline): void {
 
 export function extOf(p: Pipeline, beatId: string): BeatExt {
   return p.beats[beatId] || emptyExt();
+}
+
+export function upsertCharacter(p: Pipeline, character: Character): Character {
+  const id = character.id.trim();
+  const name = character.name.trim();
+  if (!id) throw new Error("character id is required");
+  if (!name) throw new Error("character name is required");
+  if (character.image?.url) {
+    const imageUrl = character.image.url;
+    if (!/^https?:\/\//i.test(imageUrl) && !/^data:image\//i.test(imageUrl))
+      throw new Error("character image must be an http(s) URL or data:image URL");
+  }
+  const next: Character = {
+    id,
+    name,
+    description: character.description.trim(),
+    approved: character.approved,
+    prompt: character.prompt.trim(),
+    voice: (character.voice || "").trim(),
+    ...(character.voiceId ? { voiceId: character.voiceId } : {}),
+    ...(character.voiceClip ? { voiceClip: character.voiceClip } : {}),
+    image: character.image ? { ...character.image } : null,
+  };
+  const at = p.characters.findIndex((c) => c.id === id);
+  if (at === -1) p.characters.push(next);
+  else p.characters[at] = next;
+  return structuredClone(next);
+}
+
+/** What to send TTS so a line sounds like a particular character.
+ *
+ *  A `voice_description` is re-synthesized per call, so the same description
+ *  gives a different speaker on every line (measured: 0.62-0.74 similarity
+ *  across texts, against 0.50 for a genuinely different person). A `voice_id`
+ *  is conditioned on stored reference audio and holds at 0.85. So a character
+ *  with a minted id gets the id; anything else gets the model default, which
+ *  is at least audibly wrong rather than subtly wrong. */
+export type VoiceRef = { voice_id: string } | { voice_description: string } | undefined;
+
+export function voiceFor(p: Pipeline, characterId: string | null): VoiceRef {
+  const c = characterId ? p.characters.find((x) => x.id === characterId) : undefined;
+  return c?.voiceId ? { voice_id: c.voiceId } : undefined;
+}
+
+export function upsertLocation(p: Pipeline, location: Location): Location {
+  const id = location.id.trim();
+  const name = location.name.trim();
+  if (!id) throw new Error("location id is required");
+  if (!name) throw new Error("location name is required");
+  if (location.image?.url) {
+    const imageUrl = location.image.url;
+    if (!/^https?:\/\//i.test(imageUrl) && !/^data:image\//i.test(imageUrl))
+      throw new Error("location image must be an http(s) URL or data:image URL");
+  }
+  const next: Location = {
+    id,
+    name,
+    description: location.description.trim(),
+    approved: location.approved,
+    prompt: location.prompt.trim(),
+    image: location.image ? { ...location.image } : null,
+    sourceBeatId: location.sourceBeatId?.trim() || undefined,
+    kind: location.kind === "transition" ? "transition" : "zone",
+    mapX: Math.max(0, Math.min(100, Number.isFinite(location.mapX) ? Number(location.mapX) : 50)),
+    mapY: Math.max(0, Math.min(100, Number.isFinite(location.mapY) ? Number(location.mapY) : 50)),
+    adjacentTo: [...new Set((location.adjacentTo || []).map((item) => item.trim()).filter((item) => item && item !== id))],
+    allowedElements: [...new Set((location.allowedElements || []).map((item) => item.trim()).filter(Boolean))],
+    forbiddenElements: [...new Set((location.forbiddenElements || []).map((item) => item.trim()).filter(Boolean))],
+  };
+  const locations = (p.locations ??= []);
+  const at = locations.findIndex((item) => item.id === id);
+  if (at === -1) locations.push(next);
+  else locations[at] = next;
+  return structuredClone(next);
+}
+
+const artifactUrlOkay = (artifact: Artifact | null) =>
+  !artifact?.url || /^https?:\/\//i.test(artifact.url) || /^data:image\//i.test(artifact.url);
+
+export function worldLayoutOf(p: Pipeline): WorldLayout {
+  return p.world || { name: "", description: "", approved: false, map: null, rules: [], forbiddenElements: [] };
+}
+
+export function setWorldLayout(p: Pipeline, world: WorldLayout): WorldLayout {
+  if (!world.name.trim()) throw new Error("world layout name is required");
+  if (!artifactUrlOkay(world.map)) throw new Error("world map must be an http(s) URL or data:image URL");
+  const next: WorldLayout = {
+    name: world.name.trim(),
+    description: world.description.trim(),
+    approved: !!world.approved,
+    map: world.map ? { ...world.map } : null,
+    rules: [...new Set(world.rules.map((item) => item.trim()).filter(Boolean))],
+    forbiddenElements: [...new Set(world.forbiddenElements.map((item) => item.trim()).filter(Boolean))],
+  };
+  p.world = next;
+  for (const beatId of Object.keys(p.beats)) markBeatEdited(p, beatId);
+  return structuredClone(next);
+}
+
+export function locationsAdjacent(p: Pipeline, fromId: string, toId: string): boolean {
+  if (fromId === toId) return true;
+  const from = (p.locations || []).find((location) => location.id === fromId);
+  const to = (p.locations || []).find((location) => location.id === toId);
+  return !!from && !!to && (!!from.adjacentTo?.includes(toId) || !!to.adjacentTo?.includes(fromId));
+}
+
+export function assignBeatCast(p: Pipeline, beatId: string, characterIds: string[], intentionalEmpty = false): BeatExt {
+  const ids = [...new Set(characterIds.map((id) => id.trim()).filter(Boolean))];
+  const known = new Set(p.characters.map((c) => c.id));
+  const unknown = ids.find((id) => !known.has(id));
+  if (unknown) throw new Error(`unknown character "${unknown}"`);
+  if (intentionalEmpty && ids.length) throw new Error("intentional-empty cast cannot include character ids");
+  const ext = { ...extOf(p, beatId), characterIds: ids, castIntentionalEmpty: intentionalEmpty };
+  p.beats[beatId] = ext;
+  markBeatEdited(p, beatId);
+  return structuredClone(ext);
+}
+
+export function assignBeatLocation(p: Pipeline, beatId: string, locationId: string): BeatExt {
+  const id = locationId.trim();
+  if (!(p.locations || []).some((location) => location.id === id)) throw new Error(`unknown location "${id}"`);
+  const current = extOf(p, beatId);
+  const ext = { ...current, locationId: id, geography: current.locationId === id ? current.geography : undefined };
+  p.beats[beatId] = ext;
+  markBeatEdited(p, beatId);
+  return structuredClone(ext);
+}
+
+export function assignBeatGeography(
+  p: Pipeline,
+  beatId: string,
+  plan: BeatGeography & { locationId: string },
+): BeatExt {
+  const locationId = plan.locationId.trim();
+  if (!(p.locations || []).some((location) => location.id === locationId)) throw new Error(`unknown location "${locationId}"`);
+  for (const linkedId of [plan.entryFromId, plan.exitToId].filter((id): id is string => !!id)) {
+    if (!(p.locations || []).some((location) => location.id === linkedId)) throw new Error(`unknown location "${linkedId}"`);
+    if (!locationsAdjacent(p, linkedId, locationId)) throw new Error(`location "${linkedId}" is not adjacent to "${locationId}"`);
+  }
+  const movement: BeatMovement = ["hold", "enter", "cross", "exit", "arrive"].includes(plan.movement) ? plan.movement : "hold";
+  const screenDirection: ScreenDirection = ["left-to-right", "right-to-left", "toward-camera", "away-camera", "hold"].includes(plan.screenDirection)
+    ? plan.screenDirection
+    : "hold";
+  const ext = {
+    ...extOf(p, beatId),
+    locationId,
+    geography: {
+      movement,
+      screenDirection,
+      entryFromId: plan.entryFromId?.trim() || undefined,
+      exitToId: plan.exitToId?.trim() || undefined,
+      anchor: plan.anchor?.trim() || undefined,
+    },
+  };
+  p.beats[beatId] = ext;
+  markBeatEdited(p, beatId);
+  return structuredClone(ext);
+}
+
+const uniqueStrings = (items: Array<string | undefined>) => [...new Set(items.map((item) => item?.trim()).filter((item): item is string => !!item))];
+
+export function geographyPrompt(p: Pipeline, ext: BeatExt): string {
+  const location = (p.locations || []).find((item) => item.id === ext.locationId);
+  if (!location) return "";
+  const byId = (id?: string) => (p.locations || []).find((item) => item.id === id)?.name;
+  const route = uniqueStrings([byId(ext.geography?.entryFromId), location.name, byId(ext.geography?.exitToId)]).join(" → ");
+  const world = worldLayoutOf(p);
+  const bans = uniqueStrings([...world.forbiddenElements, ...(location.forbiddenElements || [])]);
+  return [
+    `World geography is locked to ${world.name || "the approved world map"}`,
+    `Current location: ${location.name}. ${location.description}`,
+    route && `Route: ${route}`,
+    ext.geography && `Blocking: ${ext.geography.movement}, screen direction ${ext.geography.screenDirection}${ext.geography.anchor ? `, anchor ${ext.geography.anchor}` : ""}`,
+    location.allowedElements?.length && `Only established location elements: ${location.allowedElements.join(", ")}`,
+    world.rules.length && `Continuity rules: ${world.rules.join("; ")}`,
+    bans.length && `Never introduce: ${bans.join(", ")}`,
+    "Do not invent a new location, landmark, structure, prop, or route",
+  ].filter(Boolean).join(". ") + ".";
+}
+
+export function geographyIssues(shot: Pick<Shot, "prompt">, p: Pipeline, ext: BeatExt = emptyExt()): string[] {
+  const issues: string[] = [];
+  const world = worldLayoutOf(p);
+  const location = (p.locations || []).find((item) => item.id === ext.locationId);
+  if (!world.approved) issues.push("approve the world geography");
+  if (!world.map?.url) issues.push("generate or attach the master bird's-eye map");
+  if (!location) issues.push("assign a canonical location");
+  else {
+    if (!location.approved) issues.push("approve the assigned location");
+    if (!location.image?.url) issues.push("generate or attach the eye-level location plate");
+    if (!location.sourceBeatId) issues.push("choose the correct source beat for this location");
+  }
+  if (!ext.geography) issues.push("plan beat movement and screen direction");
+  else if (location) {
+    for (const linkedId of [ext.geography.entryFromId, ext.geography.exitToId].filter((id): id is string => !!id)) {
+      if (!locationsAdjacent(p, linkedId, location.id)) issues.push(`route ${linkedId} → ${location.id} is not adjacent on the world map`);
+    }
+  }
+  const bans = uniqueStrings([...world.forbiddenElements, ...(location?.forbiddenElements || [])]);
+  const prompt = shot.prompt.toLowerCase();
+  for (const banned of bans) {
+    const escaped = banned.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    for (const hit of prompt.matchAll(new RegExp(`\\b${escaped}\\b`, "gi"))) {
+      // A prompt carrying its own negative canon ("…; no desert, fortress, bells")
+      // bans the thing — it does not introduce it. Flagging those trains everyone
+      // to ignore the gate, and then real violations hide in the noise.
+      const clause = prompt.slice(0, hit.index ?? 0).split(/[.;!?]/).pop() || "";
+      if (/\b(?:no|never|not|without|avoid|exclude|free of)\b/.test(clause)) continue;
+      issues.push(`prompt introduces forbidden geography "${banned}"`);
+      break;
+    }
+  }
+  return issues;
 }
 
 // The animatic cut: one item per beat, playing whatever it already has — the
@@ -182,10 +456,10 @@ ${intent}`,
 
 // The default final-render prompt: beat text + tracer motion + solved camera
 // move + reference-intent instruction (reuses the existing motionSummary).
-export function buildFinalPrompt(beatText: string, ext: BeatExt, chars: Character[]): string {
-  const nameOf = (id: string | null) => chars.find((c) => c.id === id)?.name || (id ? "subject" : "camera");
+export function buildFinalPrompt(beatText: string, ext: BeatExt, pipe: Pipeline): string {
+  const nameOf = (id: string | null) => pipe.characters.find((c) => c.id === id)?.name || (id ? "subject" : "camera");
   return (
-    [beatText.trim(), motionSummary(ext.tracers, nameOf), ext.cameraMove, refIntentOf(ext).instruction, "10 second cinematic shot"]
+    [beatText.trim(), geographyPrompt(pipe, ext), motionSummary(ext.tracers, nameOf), ext.cameraMove, refIntentOf(ext).instruction, "10 second cinematic shot"]
       .filter(Boolean)
       .join(". ") + "."
   );
@@ -193,72 +467,41 @@ export function buildFinalPrompt(beatText: string, ext: BeatExt, chars: Characte
 
 // The driving images for a beat — optional, and everything works without them.
 // Capped at 4 (multi_reference limit) by genImage.
-export const beatRefs = (p: Pipeline, ext: BeatExt): string[] =>
-  p.characters
+export const beatRefs = (p: Pipeline, ext: BeatExt): string[] => {
+  const location = (p.locations || []).find((item) => item.id === ext.locationId)?.image?.url;
+  const characters = p.characters
     .filter((c) => ext.characterIds.includes(c.id))
     .map((c) => c.image?.url)
     .filter((u): u is string => !!u);
+  return [location, ...characters].filter((url): url is string => !!url).slice(0, 4);
+};
 
 /* ── model picking — the server's models list decides what's live ── */
 
-// Edit endpoints whose reference param is a list (`images`). flux2-dev's `edit`
-// takes exactly one (`image`), so it can only ever carry the first reference.
-const LIST_EDIT = /qwen|\bmage/i;
 export function pickModel(
   models: JobModel[],
-  want: "image" | "image_refs" | "image_edit" | "video" | "video_text" | "motion_video" | "tts" | "music",
+  want: JobCapability | "image_edit" | "video_text" | "tts",
 ): JobModel | undefined {
-  const has = (m: JobModel, re: RegExp) => re.test(`${m.model} ${m.endpoint} ${m.note || ""}`);
-  // Naming a specific checkpoint must read the model id only. Notes are prose
-  // and mention other models ("use qwen-image.edit for…"), so matching them
-  // picks whatever the note talks about instead of what the entry is.
-  const named = (m: JobModel, re: RegExp) => re.test(m.model);
-  // s2v/lipsync models are speech-driven and the pose-enhance model is control-video
-  // driven — neither takes our text+refs final-render params, so they must not open
-  // the final-render lane (paid jobs would just fail). `ltx-enhance` matches /ltx/.
-  const isVid = (m: JobModel) => has(m, /video|ltx|wan|kling|veo/i) && !has(m, /s2v|lipsync|enhance|pose/i);
-  const isAud = (m: JobModel) => has(m, /music|acestep|tts|speech|voice|kokoro|audio/i);
+  const inLane = (lane: JobCapability) => models.filter((model) => classifyJobModel(model) === lane);
   switch (want) {
     case "video":
-      return models.find((m) => isVid(m) && m.endpoint === "multi_reference") || models.find(isVid);
+      return preferredEntry(inLane("video_refs")) || preferredEntry(inLane("video"));
     case "video_text":
-      // no still to animate — text→video, never a keyframe endpoint that would
-      // be handed an empty image list
-      return models.find((m) => isVid(m) && m.endpoint === "generate") || models.find(isVid);
+      return preferredEntry(inLane("video").filter((model) => model.endpoint === "generate"));
     case "motion_video":
-      return models.find((m) => m.endpoint === "enhance" && has(m, /ltx|pose|motion|control/i));
+      return preferredEntry(inLane("motion_video"));
     case "tts":
-      return models.find((m) => has(m, /tts|speech|voice|kokoro/i));
+      return preferredEntry(inLane("speech"));
     case "music":
-      return models.find((m) => has(m, /music|acestep/i));
+      return preferredEntry(inLane("music"));
     case "image_edit":
-      // Editing an existing still, never regenerating it from scratch. Mage-Flow's
-      // edit checkpoint wins when the account exposes it; flux2-dev edit until then.
-      // \bmage, because "mage" is also the tail of "i-mage" and "qwen-i-mage".
-      return (
-        models.find((m) => m.endpoint === "edit" && named(m, /\bmage/i)) || models.find((m) => m.endpoint === "edit")
-      );
+      return preferredEntry(models.filter((model) => model.endpoint === "edit" && ["image", "image_refs"].includes(classifyJobModel(model))));
     case "image_refs":
-      // The reference-driven render. Qwen's edit checkpoint is the
-      // identity-lock path and is Apache-2.0, so it leads; flux2-dev's
-      // multi_reference is the fallback. Mage-Flow-Edit is deliberately NOT
-      // preferred here — it returns the content gate's blank placeholder for
-      // 2+ references plus a descriptive prompt (verified on the box), and it
-      // only reaches this lane if nothing else on the account can take refs.
-      return (
-        models.find((m) => m.endpoint === "edit" && named(m, /qwen/i)) ||
-        models.find((m) => !isVid(m) && m.endpoint === "multi_reference") ||
-        models.find((m) => !isVid(m) && m.endpoint === "edit")
-      );
+      return preferredEntry(inLane("image_refs"));
+    case "image":
+      return preferredEntry(inLane("image").filter((model) => model.endpoint === "generate"));
     default:
-      // Mage-Flow-Turbo is the plain-generation default (fast, MIT-licensed);
-      // flux2-dev stays the fallback where the account doesn't expose it.
-      return (
-        models.find((m) => m.endpoint === "generate" && named(m, /\bmage/i)) ||
-        models.find((m) => m.model === "flux2-dev" && m.endpoint === "generate") ||
-        models.find((m) => m.endpoint === "generate" && !isVid(m) && !isAud(m)) ||
-        models[0]
-      );
+      return preferredEntry(inLane(want));
   }
 }
 
@@ -290,11 +533,19 @@ export async function genImage(
   const params: Record<string, unknown> = { prompt };
   if (refs.length && m.endpoint === "multi_reference") params.images = refs;
   else if (refs.length && m.endpoint === "edit") {
-    // Qwen documents 1-3 references as its optimal range, so don't hand it a
-    // fourth. flux2-dev's edit keeps only the first — that lane loses the rest.
-    if (LIST_EDIT.test(m.model)) params.images = refs.slice(0, 3);
+    // The live schema decides whether this edit accepts an ordered reference
+    // list or a single source image.
+    if (m.params?.images?.type === "list-of-path-or-url") params.images = refs;
     else params.image = refs[0];
   }
+  // The v6 identity-drift bug, made unreachable. A ref-less video render is
+  // text→video: the model re-invents every character from prose, so the same
+  // character came back a grey ogre in one shot and a golden lion in the next.
+  // And when refs ARE supplied but the picked endpoint has no slot for them,
+  // the block above silently drops them — same failure, no error. Both throw.
+  if (opts?.video && !refs.length) throw new Error("a final clip must animate a still — render the beat's still first");
+  if (refs.length && !("images" in params) && !("image" in params))
+    throw new Error(`${m.model}.${m.endpoint} takes no reference images — cast identity would be re-invented`);
   return runJob(ps, m, params);
 }
 
@@ -343,17 +594,79 @@ export async function enhanceMotionVideo(
 // TTS: use a listed jobs model or fall back to the direct /api/v1/tts route.
 // Both accept `text`, not `prompt`. `voice` is the model's optional natural-
 // language `voice_description`, passed through on both paths.
-export async function ttsLine(ps: PS, text: string, voice?: string): Promise<Artifact> {
+export async function ttsLine(ps: PS, text: string, voice?: VoiceRef): Promise<Artifact> {
   const m = pickModel(ps.models, "tts");
-  if (m) return runJob(ps, m, { text, ...(voice?.trim() ? { voice_description: voice.trim() } : {}) });
+  if (m) return runJob(ps, m, { text, ...(voice ?? {}) });
   return ttsDirect(ps.apiKey, text, voice);
 }
 
-async function ttsFetch(apiKey: string, text: string, voice?: string, path = "/api/v1/tts", signal?: AbortSignal): Promise<Response> {
+/** Mint a voice. Pass a description to design one, or the base64 clip from an
+ *  earlier mint to get the SAME id back — the server content-addresses the
+ *  reference audio, so re-minting after a cache eviction is not a new voice. */
+export async function mintVoice(apiKey: string, from: { voice_description: string } | { reference_audio: string }): Promise<{ voice_id: string; reference_audio: string }> {
+  const res = await fetch(`${API_BASE}/api/v1/voice`, {
+    method: "POST",
+    headers: { ...authHeaders(apiKey), "content-type": "application/json" },
+    body: JSON.stringify(from),
+  });
+  if (!res.ok) throw new Error(`voice: ${res.status}`);
+  const body = await res.json();
+  if (!body.voice_id) throw new Error("voice: no voice_id in reply");
+  return { voice_id: body.voice_id, reference_audio: body.reference_audio || "" };
+}
+
+/** Speak a line as a character, in that character's own voice, every time.
+ *
+ *  Mints the voice on first use and stores {voiceId, voiceClip} on the
+ *  character, so every later line — this session or next year — conditions on
+ *  the same reference audio. If the server has evicted the id, the stored clip
+ *  re-mints to the same id and the line is retried once; that is the whole
+ *  restart story.
+ *
+ *  A character with no `voice` written gets the model default, deliberately:
+ *  a wrong-but-consistent default is easier to notice than a voice that drifts. */
+export async function speakAs(
+  ps: PS,
+  p: Pipeline,
+  characterId: string | null,
+  text: string,
+  mut: (fn: (p: Pipeline) => void) => void,
+): Promise<Artifact> {
+  const character = characterId ? p.characters.find((c) => c.id === characterId) : undefined;
+  const design = character?.voice?.trim();
+  if (!character || !design) return ttsLine(ps, text, undefined);
+
+  const save = (voiceId: string, voiceClip: string) =>
+    mut((draft) => {
+      const c = draft.characters.find((x) => x.id === character.id);
+      if (c) Object.assign(c, { voiceId, voiceClip });
+    });
+
+  let ref = character.voiceId;
+  if (!ref) {
+    const minted = await mintVoice(ps.apiKey, { voice_description: design });
+    save((ref = minted.voice_id), minted.reference_audio);
+    character.voiceId = minted.voice_id;
+    character.voiceClip = minted.reference_audio;
+  }
+  try {
+    return await ttsLine(ps, text, { voice_id: ref });
+  } catch (err) {
+    if (!isVoiceGone(err) || !character.voiceClip) throw err;
+    const again = await mintVoice(ps.apiKey, { reference_audio: character.voiceClip });
+    save(again.voice_id, character.voiceClip);
+    return ttsLine(ps, text, { voice_id: again.voice_id });
+  }
+}
+
+/** A voice_id the server has evicted. Recoverable — we hold the clip. */
+export const isVoiceGone = (err: unknown) => /^tts: 404$/.test(String((err as Error)?.message));
+
+async function ttsFetch(apiKey: string, text: string, voice?: VoiceRef, path = "/api/v1/tts", signal?: AbortSignal): Promise<Response> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: { ...authHeaders(apiKey), "content-type": "application/json" },
-    body: JSON.stringify({ text, ...(voice?.trim() ? { voice_description: voice.trim() } : {}) }),
+    body: JSON.stringify({ text, ...(voice ?? {}) }),
     signal,
   });
   if (!res.ok) throw new Error(`tts: ${res.status}`);
@@ -367,7 +680,7 @@ async function ttsFetch(apiKey: string, text: string, voice?: string, path = "/a
  *
  *  Body is raw samples with no wav container, so the format lives only in
  *  X-Sample-Rate/-Channels/-Sample-Format. Hand the Response to playPcmStream. */
-export function ttsStream(apiKey: string, text: string, voice?: string, signal?: AbortSignal): Promise<Response> {
+export function ttsStream(apiKey: string, text: string, voice?: VoiceRef, signal?: AbortSignal): Promise<Response> {
   return ttsFetch(apiKey, text, voice, "/api/v1/tts/stream", signal);
 }
 
@@ -375,7 +688,7 @@ export function ttsStream(apiKey: string, text: string, voice?: string, signal?:
  *
  *  Playback does not need an Artifact URL, so this path avoids a base64 encode
  *  and decode round trip for inline audio. */
-export async function ttsBytes(apiKey: string, text: string, voice?: string): Promise<ArrayBuffer> {
+export async function ttsBytes(apiKey: string, text: string, voice?: VoiceRef): Promise<ArrayBuffer> {
   const res = await ttsFetch(apiKey, text, voice);
   if ((res.headers.get("content-type") || "").includes("json")) {
     const body = await res.json();
@@ -388,7 +701,7 @@ export async function ttsBytes(apiKey: string, text: string, voice?: string): Pr
 /** Direct TTS path: no submit/poll cycle or storage round trip. Conversation
  *  uses this; storyboard audio uses the jobs path because it needs a persisted
  *  media asset. */
-export async function ttsDirect(apiKey: string, text: string, voice?: string): Promise<Artifact> {
+export async function ttsDirect(apiKey: string, text: string, voice?: VoiceRef): Promise<Artifact> {
   const res = await ttsFetch(apiKey, text, voice);
   const ct = res.headers.get("content-type") || "";
   if (ct.includes("json")) {
@@ -401,18 +714,78 @@ export async function ttsDirect(apiKey: string, text: string, voice?: string): P
 }
 
 /* ── copilot proposers — strict-JSON chat calls ── */
+/** Walk a model reply and pull out the first balanced top-level JSON value (object
+ *  or array). `JSON.parse` on a naive `lastIndexOf` slice dies when the model wrote
+ *  unescaped quotes, and trailing prose after the value throws the parser; a
+ *  depth-counting walk stops at the depth-0 closing token that truly closes the
+ *  value. Prose that mentions braces (e.g. `like {x: 1}`) is skipped because only
+ *  the balanced top-level slice is returned. */
+function jsonSlice(text: string): string {
+  const sliceFrom = (start: number): string => {
+    const opens = text[start] === "{" ? "{" : "[";
+    const closes = opens === "{" ? "}" : "]";
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (let i = start; i < text.length; i++) {
+      const c = text[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === "\\") esc = true;
+        else if (c === '"') inStr = false;
+        continue;
+      }
+      if (c === '"') inStr = true;
+      else if (c === opens) depth++;
+      else if (c === closes) {
+        depth--;
+        if (depth === 0) return text.slice(start, i + 1);
+      }
+    }
+    return "";
+  };
+  const o = text.indexOf("{");
+  const a = text.indexOf("[");
+  if (o === -1 && a === -1) return "";
+  // Prefer the longest balanced slice: when the reply is `[ {...}, {...} ]` the
+  // array starts before the first object, so the array slice is the full value;
+  // longest-wins keeps prose braces from being mistaken for the value.
+  const obj = o !== -1 ? sliceFrom(o) : "";
+  const arr = a !== -1 ? sliceFrom(a) : "";
+  if (obj && arr) return obj.length >= arr.length ? obj : arr;
+  return obj || arr;
+}
+
 async function chatJSON<T>(apiKey: string, system: string, user: string): Promise<T> {
-  const content = await chatCompletion(apiKey, [
+  const base: ChatMessage[] = [
     { role: "system", content: system },
     { role: "user", content: user },
-  ]);
-  let text = content.trim();
-  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fence) text = fence[1].trim();
-  const start = Math.min(...["{", "["].map((c) => text.indexOf(c)).filter((i) => i !== -1));
-  const end = Math.max(text.lastIndexOf("}"), text.lastIndexOf("]"));
-  if (!isFinite(start) || end <= start) throw new Error("copilot: no JSON in reply");
-  return JSON.parse(text.slice(start, end + 1));
+  ];
+  const parse = (raw: string): T => {
+    let text = raw.trim();
+    const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fence) text = fence[1].trim();
+    const slice = jsonSlice(text);
+    if (!slice) throw new Error("copilot: no JSON in reply");
+    try {
+      return JSON.parse(slice) as T;
+    } catch {
+      throw new Error("copilot: malformed JSON in reply");
+    }
+  };
+  const first = await chatCompletion(apiKey, base);
+  try {
+    return parse(first);
+  } catch (e) {
+    // The reply had no JSON (or broken JSON) — nudge once with the JSON-only rule
+    // made explicit, then parse the retry. Mirrors requestJobPlan's recovery.
+    const retry = await chatCompletion(apiKey, [
+      ...base,
+      { role: "assistant", content: first },
+      { role: "user", content: "Reply with ONLY the JSON — no prose, no code fences." },
+    ]);
+    return parse(retry);
+  }
 }
 
 const beatLines = (beats: { id: string; prompt: string }[]) =>

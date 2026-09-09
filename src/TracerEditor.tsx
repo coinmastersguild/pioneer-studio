@@ -1,15 +1,19 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { colorFor, newId, type Character, type Tracer } from "./pipeline";
 
 // Draw motion dots, paths, and speech markers over the scene.
 // Click to drop points (times auto-spread over the 10s beat), drag to adjust.
 export default function TracerEditor({
   bg,
+  locationBg,
+  locationName,
   tracers,
   chars,
   onChange,
 }: {
   bg: string | null;
+  locationBg?: string | null;
+  locationName?: string | null;
   tracers: Tracer[];
   chars: Character[];
   onChange(next: Tracer[]): void;
@@ -18,8 +22,11 @@ export default function TracerEditor({
   const [draftId, setDraftId] = useState<string | null>(null); // move path being drawn
   const [speechText, setSpeechText] = useState("");
   const [sel, setSel] = useState<{ tid: string; pi: number } | null>(null); // selected point (time editing)
+  const [surface, setSurface] = useState<"beat" | "location">(() => (locationBg ? "location" : "beat"));
   const svgRef = useRef<SVGSVGElement>(null);
   const drag = useRef<{ tid: string; pi: number } | null>(null);
+  useEffect(() => setSurface(locationBg ? "location" : "beat"), [locationBg]);
+  const activeBg = surface === "location" && locationBg ? locationBg : bg;
 
   const roster: { id: string | null; name: string }[] = [
     ...chars.filter((c) => c.approved).map((c) => ({ id: c.id as string | null, name: c.name })),
@@ -79,7 +86,7 @@ export default function TracerEditor({
     <div className="tracer-ed">
       <div
         className="tracer-canvas"
-        style={bg ? { backgroundImage: `url(${bg})`, backgroundSize: "cover", backgroundPosition: "center" } : {}}
+        style={activeBg ? { backgroundImage: `url(${activeBg})`, backgroundSize: "cover", backgroundPosition: "center" } : {}}
       >
         <svg
           ref={svgRef}
@@ -132,6 +139,12 @@ export default function TracerEditor({
         </svg>
       </div>
       <div className="tracer-tools">
+        {locationBg && (
+          <span className="tracer-surfaces" aria-label="Tracer drawing surface">
+            <button type="button" className={surface === "location" ? "on" : ""} onClick={() => setSurface("location")}>Location · {locationName || "plate"}</button>
+            {bg && <button type="button" className={surface === "beat" ? "on" : ""} onClick={() => setSurface("beat")}>Beat frame</button>}
+          </span>
+        )}
         {roster.map((r) => (
           <button
             key={r.id ?? "cam"}

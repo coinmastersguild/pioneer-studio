@@ -21,6 +21,7 @@ import { consumeCharacter } from "./characterHandoff";
 import VrmPicker from "./VrmPicker";
 import { registerActions } from "./control";
 import { queueStudioAsset } from "./studioHandoff";
+import { consumeStageProp } from "./stageHandoff";
 import "./stage.css";
 
 const TAKE_SECONDS = 10; // matches the storyboard's default beat duration
@@ -743,6 +744,12 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
     // Create→Animation handoff: a character sent its VRM here → spawn an actor
     // wearing it. Consumed once (cleared), so it doesn't re-fire on every switch.
     if (active) {
+      const prop = consumeStageProp();
+      if (prop) {
+        stage.addProp(prop.name.replace(/\.(glb|gltf)$/i, ""), prop.url)
+          .then(() => psRef.current.toast(`${prop.name} added as a Stage prop`, "gold"))
+          .catch((error) => psRef.current.toast(`Prop failed: ${String(error?.message || error).slice(0, 90)}`));
+      }
       const pending = consumeCharacter("animate");
       if (pending?.vrmUrl) {
         const a = stage.addActor();

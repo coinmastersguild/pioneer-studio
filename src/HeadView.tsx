@@ -12,8 +12,9 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { VRMLoaderPlugin, VRMUtils, type VRM } from "@pixiv/three-vrm";
-import { askLore, transcribe } from "./api";
-import { ttsBytes, ttsStream } from "./pipeline";
+import { transcribe, type ChatMessage } from "./api";
+import { beginStudioAgentTurn, continueStudioAgentTurn, executeStudioAction } from "./studioAgent";
+import { isVoiceGone, mintVoice, ttsBytes, ttsStream, type VoiceRef } from "./pipeline";
 import { playPcmStream, segmentSpeech } from "./speech";
 import { SLIDERS } from "./headMorphs";
 import { GnmFaceRig, VrmFaceRig, type FaceRig } from "./faceRig";
@@ -36,6 +37,7 @@ const HEAD_URL = "/models/gnm-head.glb";
 const DESIGN_KEY = "pioneer_studio_head_design";
 const PERSONA_KEY = "pioneer_studio_head_persona";
 const VOICE_KEY = "pioneer_studio_head_voice";
+const VOICE_ID_KEY = "pioneer_studio_head_voice_id";
 
 const DEFAULT_PERSONA =
   "You are a weathered frontier scout who has walked every ridge of this world. Warm, dry humour, never more than two sentences.";
@@ -44,7 +46,59 @@ const DEFAULT_VOICE = "older man, gravelly and unhurried, a trail-worn drawl";
 
 type Turn = { id: number; who: "you" | "head"; text: string };
 
-export default function HeadView({ ps, active }: { ps: PS; active: boolean }) {
+/** The voice the head speaks with, minted once and then reused forever.
+ *
+ *  A voice_description is re-designed on every request, which is why the head
+ *  used to change voice between turns of one conversation. A voice_id is
+ *  conditioned on the stored clip, so turn 40 sounds like turn 1. The clip
+ *  rides along so an evicted id re-mints to the same id.
+ *
+ *  Minting failures fall back to the model default rather than to a
+ *  description: a default voice is obviously not the character, where a
+ *  description sounds nearly right and drifts. Loud beats subtle. */
+type MintedVoice = { design: string; voice_id: string; reference_audio: string };
+
+function mintedVoice(): MintedVoice | null {
+  try {
+    return JSON.parse(localStorage.getItem(VOICE_ID_KEY) || "null");
+  } catch {
+    return null;
+  }
+}
+
+async function headVoice(apiKey: string, design: string): Promise<VoiceRef> {
+  if (!design.trim()) return undefined;
+  const cached = mintedVoice();
+  if (cached?.voice_id && cached.design === design) return { voice_id: cached.voice_id };
+  try {
+    const minted = await mintVoice(apiKey, { voice_description: design });
+    localStorage.setItem(VOICE_ID_KEY, JSON.stringify({ design, ...minted }));
+    return { voice_id: minted.voice_id };
+  } catch {
+    return undefined;
+  }
+}
+
+/** The server dropped the id from its cache; the clip mints back to the same one. */
+async function remintHeadVoice(apiKey: string): Promise<VoiceRef> {
+  const cached = mintedVoice();
+  if (!cached?.reference_audio) return undefined;
+  try {
+    const minted = await mintVoice(apiKey, { reference_audio: cached.reference_audio });
+    localStorage.setItem(VOICE_ID_KEY, JSON.stringify({ ...cached, voice_id: minted.voice_id }));
+    return { voice_id: minted.voice_id };
+  } catch {
+    return undefined;
+  }
+}
+
+export default function HeadView({
+  ps,
+  active,
+}: {
+  ps: PS;
+  active: boolean;
+}) {
   const mountRef = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
   const [err, setErr] = useState("");
@@ -72,6 +126,7 @@ export default function HeadView({ ps, active }: { ps: PS; active: boolean }) {
   const designRef = useRef(design);
   const gazeRef = useRef(gaze);
   const activeRef = useRef(active);
+  const agentHistRef = useRef<ChatMessage[]>([]);
   const rigRef = useRef<FaceRig | null>(null);
   const lipRef = useRef<VrmLipSync | null>(null);
   const audioRef = useRef<AudioContext | null>(null);
@@ -232,7 +287,8 @@ export default function HeadView({ ps, active }: { ps: PS; active: boolean }) {
     renderer.setAnimationLoop(() => {
       const dt = 1 / 60;
       clock += dt;
-      if (!activeRef.current) return; // offscreen: hold the last frame, spend nothing
+      // offscreen: hold the last frame, spend nothing.
+      if (!activeRef.current) return;
       const rig = rigRef.current;
       if (rig) {
         // One lip-sync engine serves both rigs: VrmLipSync reads the
@@ -298,8 +354,10 @@ export default function HeadView({ ps, active }: { ps: PS; active: boolean }) {
       soundingRef.current = true;
       setBusy("speaking…");
     };
+    let ref = await headVoice(ps.apiKey, voiceRef.current);
+    if (signal.aborted) return;
     try {
-      const res = await ttsStream(ps.apiKey, line, voiceRef.current, signal);
+      const res = await ttsStream(ps.apiKey, line, ref, signal);
       await playPcmStream(ctx, res, wire, signal, sounding);
       return;
     } catch (e: any) {
@@ -309,9 +367,12 @@ export default function HeadView({ ps, active }: { ps: PS; active: boolean }) {
       // dies halfway has already played half the line; re-voicing the whole
       // thing would say the opening twice.
       if (sounded) throw e;
-      setBusy("streaming voice down — using the buffered route…");
+      if (isVoiceGone(e)) {
+        ref = await remintHeadVoice(ps.apiKey);
+        setBusy("re-minting the voice…");
+      } else setBusy("streaming voice down — using the buffered route…");
     }
-    const bytes = await ttsBytes(ps.apiKey, line, voiceRef.current);
+    const bytes = await ttsBytes(ps.apiKey, line, ref);
     if (signal.aborted) return;
     const buf = await ctx.decodeAudioData(bytes);
     const src = ctx.createBufferSource();
@@ -336,11 +397,54 @@ export default function HeadView({ ps, active }: { ps: PS; active: boolean }) {
 
   /** lore → voice. `gen` is the utterance this turn belongs to; if a newer one
    *  has started (the user interrupted) every step after that point is dropped. */
+  /** The head IS the page agent, in every mode. It answers by driving the same
+   *  registry the buttons use, so the UI updates as a side effect of the real
+   *  handler running — there is no second code path to keep in sync.
+   *
+   *  Rounds chain: opening a mode registers that mode's actions, so the next
+   *  round can use them. Free actions run; only paid/destructive ones are held
+   *  back for a real click. */
+  async function agentAnswer(question: string, gen: number): Promise<string> {
+    const p = psRef.current;
+    const held: string[] = [];
+    let turn = await beginStudioAgentTurn(p.apiKey, question, {
+      mode: p.mode,
+      board: p.board,
+      media: p.media,
+      history: agentHistRef.current,
+      persona,
+    });
+    for (let round = 0; round < 5; round++) {
+      if (gen !== genRef.current) return "";
+      const runnable = turn.actions.filter((a) => !a.confirmation);
+      held.push(...turn.actions.filter((a) => a.confirmation).map((a) => a.confirmation!));
+      if (!runnable.length) break;
+      const results = [];
+      for (const a of runnable) {
+        setBusy(a.actionName);
+        log("head", `· ${a.actionName}`);
+        results.push(await executeStudioAction(a));
+        // let React paint the change before the next call — otherwise a whole
+        // chain lands in one frame and the page appears to teleport
+        await new Promise((r) => setTimeout(r, 90));
+      }
+      if (gen !== genRef.current) return "";
+      setBusy("thinking…");
+      turn = await continueStudioAgentTurn(psRef.current.apiKey, turn, results);
+    }
+    agentHistRef.current = [...agentHistRef.current, { role: "user" as const, content: question }].slice(-20);
+    const said = turn.assistant.content || "Done.";
+    return held.length ? `${said} I left ${held.length === 1 ? "one thing" : `${held.length} things`} for you to confirm: ${held.join("; ")}.` : said;
+  }
+
   async function respond(question: string, gen: number) {
     try {
       setBusy("thinking…");
-      const answer = await askLore(ps.apiKey, question, persona);
-      if (gen !== genRef.current) return;
+      // Always the agent — persona rides in the system prompt, so he keeps his
+      // voice AND his hands. Routing the full view to askLore (no tools) was
+      // what made him narrate actions he never took.
+      const answer = await agentAnswer(question, gen);
+      if (gen !== genRef.current || !answer) return;
       log("head", answer);
       setBusy("voicing…");
       const ac = new AbortController();
@@ -458,8 +562,8 @@ export default function HeadView({ ps, active }: { ps: PS; active: boolean }) {
     stopSpeaking();
   }
 
-  // Leaving the tab (or unmounting) must release the mic — an open capture
-  // indicator on a tab the user has navigated away from reads as a bug.
+  // Leaving the Head view (or unmounting) must release the mic — an open
+  // capture indicator on a view you've left reads as a bug.
   useEffect(() => {
     if (!active && convoRef.current) stopConvo();
   }, [active]);

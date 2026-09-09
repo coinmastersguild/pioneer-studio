@@ -1,104 +1,60 @@
-import { pickModel } from "./pipeline";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { JobModel } from "./api";
+import JobForm from "./JobForm";
+import { classifyJobModel, type JobCapability } from "./jobCatalog";
+import { consumeJobForm } from "./jobHandoff";
 import type { PS } from "./shared";
 
-// Capability grouping mirrors pickModel's regexes (pipeline.ts) so the index
-// shows exactly what the copilot/router sees. A new model in an existing
-// category lights up here with zero code change.
-type Cap = { label: string; want: Parameters<typeof pickModel>[1]; blurb: string };
-const CAPS: Cap[] = [
-  { label: "Image", want: "image", blurb: "text → image" },
-  { label: "Image · references", want: "image_refs", blurb: "1–4 reference images → one image" },
-  { label: "Video", want: "video", blurb: "text or references → mp4 clip" },
-  { label: "Motion video", want: "motion_video", blurb: "ARDY control take + optional identity reference → mp4 clip" },
-  { label: "Music", want: "music", blurb: "prompt → scored audio" },
-  { label: "Speech", want: "tts", blurb: "text → spoken line" },
+const LANES: { id: JobCapability; label: string; blurb: string }[] = [
+  { id: "3d", label: "3D assets", blurb: "image → textured GLB prop" },
+  { id: "video_restore", label: "Video restoration", blurb: "restore or upscale an existing video" },
+  { id: "image_control", label: "Controlled image", blurb: "structure guidance → image" },
+  { id: "lipsync", label: "Lipsync", blurb: "portrait + audio → video" },
+  { id: "motion_video", label: "Motion video", blurb: "control take + optional identity → video" },
+  { id: "voice_clone", label: "Voice clone", blurb: "reference voice + text → speech" },
+  { id: "image_refs", label: "Reference image", blurb: "ordered image references → image" },
+  { id: "video_refs", label: "Reference video", blurb: "ordered image references → video" },
+  { id: "image", label: "Image", blurb: "text → image" },
+  { id: "video", label: "Video", blurb: "text → video" },
+  { id: "sfx", label: "Sound effects", blurb: "prompt → sound effect" },
+  { id: "music", label: "Music", blurb: "prompt → music or song" },
+  { id: "speech", label: "Speech", blurb: "text → spoken audio" },
+  { id: "audio", label: "Audio", blurb: "audio generation" },
+  { id: "unknown", label: "Other", blurb: "live entry with an unrecognized signature" },
 ];
 
-function capOf(m: JobModel): Cap["label"] {
-  const s = `${m.model} ${m.endpoint} ${m.note || ""}`;
-  if (m.endpoint === "enhance" && /ltx|pose|motion|control/i.test(s)) return "Motion video";
-  if (/video|ltx|wan|kling|veo/i.test(s)) return "Video";
-  if (/music|acestep/i.test(s)) return "Music";
-  if (/tts|speech|voice|kokoro/i.test(s)) return "Speech";
-  if (m.endpoint === "multi_reference" || m.endpoint === "edit") return "Image · references";
-  return "Image";
-}
-
 export default function ModelIndexView({ ps }: { ps: PS }) {
-  const models = ps.models;
-  // the model pickModel would choose for each capability = the "default" the copilot lands on
-  const picked = new Map<string, string>(); // cap.label -> `${model}.${endpoint}`
-  for (const cap of CAPS) {
-    const m = pickModel(models, cap.want);
-    if (m) picked.set(cap.label, `${m.model}.${m.endpoint}`);
-  }
-
-  return (
-    <div className="media-wrap">
-      <div className="media-head">
-        <div>
-          <h2>Models</h2>
-          <div className="sub">
-            Everything the server exposes via <code>GET /api/v1/jobs/models</code>, grouped by capability. The copilot
-            and storyboard pipeline route to these automatically — a live model here is one they can pick right now.
-          </div>
-        </div>
-      </div>
-
-      {models.length === 0 ? (
-        <div style={{ border: "1px dashed var(--border-strong)", borderRadius: "var(--radius-lg)", padding: 28, textAlign: "center", color: "var(--fg4)", fontSize: 12.5 }}>
-          no models loaded — add your key in Settings to fetch the live list
-        </div>
-      ) : (
-        CAPS.map((cap) => {
-          const rows = models.filter((m) => capOf(m) === cap.label);
-          const live = rows.length > 0;
-          return (
-            <div key={cap.label} style={{ marginBottom: 22 }}>
-              <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 8 }}>
-                <h3 style={{ margin: 0, fontSize: 14 }}>{cap.label}</h3>
-                <span style={{ fontSize: 11.5, color: "var(--fg3)" }}>{cap.blurb}</span>
-                <span className={`mf${live ? " on" : ""}`} style={{ marginLeft: "auto", pointerEvents: "none", fontSize: 11 }}>
-                  {live ? "live" : "not available"}
-                </span>
-              </div>
-              {live ? (
-                <table className="files">
-                  <thead>
-                    <tr>
-                      <th>Model</th>
-                      <th>Endpoint</th>
-                      <th>Credits</th>
-                      <th>Notes</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rows.map((m) => {
-                      const isDefault = picked.get(cap.label) === `${m.model}.${m.endpoint}`;
-                      return (
-                        <tr key={`${m.model}.${m.endpoint}`}>
-                          <td>
-                            <b>{m.model}</b>
-                            {isDefault && <span className="mf on" style={{ marginLeft: 8, pointerEvents: "none", fontSize: 10 }}>default</span>}
-                          </td>
-                          <td style={{ color: "var(--fg3)" }}>{m.endpoint}</td>
-                          <td>{typeof m.credits === "number" ? m.credits.toLocaleString() : m.credits}</td>
-                          <td style={{ color: "var(--fg3)", fontSize: 11.5, maxWidth: 460 }}>{m.note}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              ) : (
-                <div style={{ color: "var(--fg4)", fontSize: 12, paddingLeft: 2 }}>
-                  no model registered — features that need {cap.label.toLowerCase()} stay gated until one is added
-                </div>
-              )}
-            </div>
-          );
-        })
-      )}
-    </div>
+  const psRef = useRef(ps);
+  psRef.current = ps;
+  const [selected, setSelected] = useState<JobModel | null>(null);
+  const [mediaKey, setMediaKey] = useState<string | undefined>();
+  const grouped = useMemo(
+    () => new Map(LANES.map((lane) => [lane.id, ps.models.filter((entry) => classifyJobModel(entry) === lane.id)])),
+    [ps.models],
   );
+
+  useEffect(() => {
+    const current = psRef.current;
+    if (current.mode !== "models") return;
+    const pending = consumeJobForm();
+    if (!pending) return;
+    const entry = current.models.find((candidate) => classifyJobModel(candidate) === pending.capability);
+    if (entry) {
+      setMediaKey(pending.mediaKey);
+      setSelected(entry);
+    } else {
+      current.toast(`No live ${pending.capability.replaceAll("_", " ")} endpoint is available`);
+    }
+  }, [ps.mode, ps.models]);
+
+  return <div className="media-wrap">
+    <div className="media-head"><div><h2>Models</h2><div className="sub">Every live model/endpoint pair, classified from result and parameter signatures. Catalog {ps.catalogRevision || "revision unavailable"}{ps.catalogLimits.max_active_jobs ? ` · ${ps.catalogLimits.max_active_jobs} concurrent jobs` : ""}.</div></div><button type="button" className="mini-btn" onClick={() => void ps.refreshModels(true)}>Refresh catalog</button></div>
+    {!ps.catalogAvailable && ps.apiKey && <div className="catalog-warning">GPU catalog temporarily unavailable. Existing jobs continue polling; new submissions are paused.</div>}
+    {!ps.models.length ? <div className="ml-none">no models loaded — add your key in Settings to fetch the live catalog</div> : LANES.map((lane) => {
+      const rows = grouped.get(lane.id) || [];
+      if (!rows.length) return null;
+      return <section key={lane.id} className="model-lane"><div className="model-lane-head"><h3>{lane.label}</h3><span>{lane.blurb}</span><span className="mf on">{rows.length} live</span></div><table className="files"><thead><tr><th>Model</th><th>Endpoint</th><th>Result</th><th>Credits</th><th>Notes</th><th /></tr></thead><tbody>{rows.map((entry) => <tr key={`${entry.model}.${entry.endpoint}`}><td><b>{entry.model}</b>{entry.default && <span className="mf on model-default">default</span>}</td><td>{entry.endpoint}</td><td>{entry.result_ext || entry.result || "—"}</td><td>{entry.credits.toLocaleString()}</td><td className="model-note">{entry.note}</td><td><button type="button" className="mini-btn" disabled={!entry.params} onClick={() => { setMediaKey(undefined); setSelected(entry); }}>Configure</button></td></tr>)}</tbody></table></section>;
+    })}
+    {selected && <JobForm entry={selected} ps={ps} mediaKey={mediaKey} onClose={() => { setSelected(null); setMediaKey(undefined); }} />}
+  </div>;
 }

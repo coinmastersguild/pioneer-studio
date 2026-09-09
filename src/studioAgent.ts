@@ -6,7 +6,7 @@ import {
   type MediaList,
   type Storyboard,
 } from "./api";
-import { actionForTool, actionTools, callAction } from "./control";
+import { actionForTool, actionTools, callAction, confirmationForTool } from "./control";
 import type { Mode } from "./shared";
 import { loadPipeline } from "./pipeline";
 
@@ -64,12 +64,13 @@ function preparedActions(assistant: ChatAssistantMessage): PreparedStudioAction[
   for (const call of assistant.tool_calls || []) {
     const action = actionForTool(call.function.name);
     if (!action) continue;
+    const params = paramsOf(call);
     actions.push({
       call,
       actionName: action.name,
       description: action.description,
-      confirmation: action.confirmation,
-      params: paramsOf(call),
+      confirmation: confirmationForTool(call.function.name, params),
+      params,
     });
   }
   return actions;
@@ -78,12 +79,27 @@ function preparedActions(assistant: ChatAssistantMessage): PreparedStudioAction[
 export async function beginStudioAgentTurn(
   apiKey: string,
   userText: string,
-  context: { mode: Mode; board: Storyboard | null; media?: MediaList | null; history?: ChatMessage[] },
+  context: {
+    mode: Mode;
+    board: Storyboard | null;
+    media?: MediaList | null;
+    history?: ChatMessage[];
+    /** Spoken-character brief. The head keeps its voice while holding the tools. */
+    persona?: string;
+  },
 ): Promise<StudioAgentTurn> {
   const messages: ChatMessage[] = [
     {
       role: "system",
-      content: `You are the Pioneer Studio copilot. Drive the application through the provided tools when the user asks for an app action. Never claim an action happened unless you call its tool. For questions, answer briefly without a tool. Use exact beat ids from the project digest. The client itself requests confirmation before any paid or destructive action.
+      content: `You are the Pioneer Studio copilot. Drive the application through the provided tools when the user asks for an app action. Never claim an action happened unless you call its tool. Saying you did something without calling its tool is the single worst thing you can do. For questions, answer briefly without a tool. Use exact beat ids from the project digest. The client itself requests confirmation before any paid or destructive action.
+
+Navigating is free and expected: call app.set_mode to open a screen, then use the actions that screen registers as it mounts. Chain as many tool calls as the request needs rather than asking the user to click.${
+        context.persona
+          ? `\n\nSpeak in character throughout: ${context.persona}\nThe character is how you talk, never a reason to skip a tool call.`
+          : ""
+      }
+
+For a one-shot image, audio, or video generation from any mode, call jobs_submit. Never print a {"job": ...} plan as assistant text: that does not execute anything. jobs_submit is paid and the client will require the user's confirmation before it runs.
 
 ${digest(context.mode, context.board, context.media || null)}`,
     },
