@@ -19,12 +19,14 @@ import {
   pollJob,
   restoreActiveProject,
   setSyncErrorHandler,
+  setAuthErrorHandler,
   submitJob,
   type JobModel,
   type JobStatus,
   type ChatMessage,
   type MediaList,
   type Storyboard,
+  type WalletChoice,
 } from "./api";
 import {
   GB,
@@ -47,7 +49,9 @@ import {
   type PS,
   type Suggestion,
 } from "./shared";
-import { registerActions } from "./control";
+import { clearActions, registerActions } from "./control";
+import SignInForm from "./SignInForm";
+import { clearWalletSession, rememberWalletPreference, restoreWalletSession, saveWalletSession, setRememberWalletPreference, type WalletSession } from "./authSession";
 import { createGenerationAction } from "./generationJob";
 import { sendCharacter } from "./characterHandoff";
 import ChatView from "./ChatView";
@@ -80,18 +84,6 @@ type Toast = { id: number; msg: string; kind?: "ok" | "gold"; out?: boolean };
 type PendingAgentTurn = { turn: StudioAgentTurn; completed: StudioActionResult[]; actions: PreparedStudioAction[] };
 
 const MODE_LABEL: Record<Mode, string> = { chat: "chat", board: "storyboard", script: "script", create: "create", animate: "animation", head: "talking head", studio: "studio", media: "media", models: "models", projects: "projects", companies: "companies", settings: "settings" };
-const WALLET_SESSION_KEY = "pioneer_studio_wallet_session";
-
-function savedWalletSession(): { token: string; address: string } | null {
-  try {
-    const value = JSON.parse(sessionStorage.getItem(WALLET_SESSION_KEY) || "null");
-    if (typeof value?.token === "string" && typeof value?.address === "string" &&
-        Number.isFinite(value?.expiresAt) && value.expiresAt > Date.now()) return value;
-    sessionStorage.removeItem(WALLET_SESSION_KEY);
-  } catch { /* invalid or disabled storage */ }
-  return null;
-}
-
 function App() {
   // Dev-only credential seed. Without it an agent driving the /mcp
   // bridge can never authenticate — every board/studio action needs a key, and
@@ -99,8 +91,20 @@ function App() {
   // doesn't require a human typing into Settings. `import.meta.env.DEV` is
   // false in `vite build`, the same guard the MCP plugin itself uses, so this
   // never reaches production and nothing is persisted.
-  const [apiKey, setApiKey] = useState(() => (import.meta.env.DEV && import.meta.env.VITE_PIONEER_API) || savedWalletSession()?.token || "");
-  const [wallet, setWallet] = useState(() => savedWalletSession()?.address || localStorage.getItem("pioneer_studio_wallet") || "");
+  const [restoredSession] = useState(() => restoreWalletSession());
+  const [walletSession, setWalletSession] = useState<WalletSession | null>(restoredSession?.session ?? null);
+  const [apiKey, setApiKey] = useState(() => (import.meta.env.DEV && import.meta.env.VITE_PIONEER_API) || restoredSession?.session.token || "");
+  const [wallet, setWallet] = useState(() => restoredSession?.session.address || "");
+  const [remember, setRemember] = useState(() => restoredSession?.remember ?? rememberWalletPreference());
+  const [keyDraft, setKeyDraft] = useState("");
+  const [authProgress, setAuthProgress] = useState("");
+  const [authDetail, setAuthDetail] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [accountEpoch, setAccountEpoch] = useState(0);
+  const accountEpochRef = useRef(0);
+  const authAttempt = useRef<AbortController | null>(null);
+  const rememberRef = useRef(remember);
+  rememberRef.current = remember;
   const [mode, setMode] = useState<Mode>("chat");
   const [models, setModels] = useState<JobModel[]>([]);
   const [catalogRevision, setCatalogRevision] = useState<string | null>(null);
@@ -151,21 +155,31 @@ function App() {
   // only fires until it succeeds (Settings writes apiKey on every keystroke).
   const deepLinkedProject = useRef(new URLSearchParams(location.search).get("project"));
 
-  // Purge old persistent credentials. The wallet session is scoped to this
-  // browser tab and expires after at most twelve hours.
   useEffect(() => {
-    localStorage.removeItem("pioneer_studio_api_key");
-    sessionStorage.removeItem("pioneer_studio_api_key");
+    setAuthErrorHandler((rejectedKey) => {
+      if (rejectedKey !== apiKeyRef.current) return;
+      signOut();
+      setAuthError("Your Pioneer session expired or was rejected. Sign in again to continue.");
+    });
+    return () => setAuthErrorHandler();
   }, []);
 
   useEffect(() => {
-    const session = savedWalletSession();
-    if (!session) return;
-    fetchAccount(session.token).catch((error) => {
-      if (String(error).includes("account: 401")) signOut();
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!walletSession) return;
+    const sessionKey = walletSession.token;
+    const checkExpiry = () => {
+      if (apiKeyRef.current !== sessionKey) return;
+      if (walletSession.expiresAt <= Date.now()) {
+        signOut();
+        setAuthError("Your wallet session expired. Sign in again to continue.");
+      }
+    };
+    // Long sessions can exceed setTimeout's 32-bit delay; recheck every minute as well as on focus.
+    const timer = window.setInterval(checkExpiry, 60_000);
+    window.addEventListener("focus", checkExpiry);
+    checkExpiry();
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", checkExpiry); };
+  }, [walletSession]);
 
   // Invite link (/?join=<companyAddress>) opens the Companies page, which
   // handles the actual join request once a credential is present.
@@ -191,7 +205,7 @@ function App() {
   useEffect(() => {
     refreshBoard();
     if (!apiKey) return;
-    // debounced — the Settings key input writes here on every keystroke
+    // Reauthorize the last project with the current credential before reopening it.
     const t = setTimeout(() => {
       void refreshModels(true);
       refreshCredits();
@@ -202,14 +216,18 @@ function App() {
       if (pid) {
         openProject(apiKey, pid)
           .then(() => {
+            if (apiKeyRef.current !== apiKey) return;
             deepLinkedProject.current = null;
             refreshBoard();
             setMode("board");
           })
-          .catch(() => restoreActiveProject(apiKey).then((r) => r && refreshBoard()));
+          .catch(() => {
+            if (apiKeyRef.current !== apiKey) return;
+            return restoreActiveProject(apiKey).then((restored) => { if (restored && apiKeyRef.current === apiKey) refreshBoard(); });
+          });
       } else {
         restoreActiveProject(apiKey).then((restored) => {
-          if (restored) refreshBoard();
+          if (restored && apiKeyRef.current === apiKey) refreshBoard();
         });
       }
     }, 500);
@@ -220,7 +238,7 @@ function App() {
   useEffect(() => {
     if (!apiKey) return;
     const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") void refreshModels();
+      if (document.visibilityState === "visible") { void refreshModels(); refreshCredits(); }
     };
     window.addEventListener("focus", refreshWhenVisible);
     document.addEventListener("visibilitychange", refreshWhenVisible);
@@ -251,8 +269,10 @@ function App() {
 
   function refreshCredits() {
     if (!apiKeyRef.current) return;
-    fetchAccount(apiKeyRef.current)
+    const key = apiKeyRef.current;
+    fetchAccount(key)
       .then((acc) => {
+        if (apiKeyRef.current !== key) return;
         const c = acc.credits ?? acc.balance ?? acc.credits_remaining;
         if (typeof c === "number") setCredits(c);
       })
@@ -266,6 +286,7 @@ function App() {
     catalogRefreshAt.current = now;
     try {
       const catalog = await fetchModels(key);
+      if (apiKeyRef.current !== key) return;
       setModels(catalog.jobs);
       setCatalogRevision(catalog.catalog_revision || null);
       setCatalogLimits(catalog.limits || {});
@@ -273,12 +294,13 @@ function App() {
     } catch {
       // Already-owned jobs keep polling through waitForJob. Only new
       // submissions are gated while discovery is unavailable.
-      setCatalogAvailable(false);
+      if (apiKeyRef.current === key) setCatalogAvailable(false);
     }
   }
   function refreshMedia() {
     if (!apiKeyRef.current) return;
-    fetchMedia(apiKeyRef.current).then(setMedia).catch(() => {});
+    const key = apiKeyRef.current;
+    fetchMedia(key).then((value) => { if (apiKeyRef.current === key) setMedia(value); }).catch(() => {});
   }
   function refreshBoard() {
     // storyboard doc is local-first — no key needed to read it
@@ -300,41 +322,125 @@ function App() {
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 2750);
   }
 
-  async function onConnectWallet() {
-    try {
-      const { token, address, expiresAt } = await connectWallet();
-      setApiKey(token);
-      setWallet(address);
-      localStorage.setItem("pioneer_studio_wallet", address);
-      try {
-        sessionStorage.setItem(WALLET_SESSION_KEY, JSON.stringify({
-          token, address, expiresAt: Math.min(expiresAt * 1000, Date.now() + 12 * 60 * 60 * 1000),
-        }));
-      } catch { /* Browsers with disabled storage still work until reload. */ }
-      toast(`Wallet connected · ${address.slice(0, 6)}…${address.slice(-4)}`, "gold");
-    } catch (e: any) {
-      toast(String(e.message || e));
-    }
-  }
-
-  function onManualKey(key: string) {
-    try { sessionStorage.removeItem(WALLET_SESSION_KEY); } catch { /* storage disabled */ }
-    setWallet("");
-    setApiKey(key);
-  }
-
-  function signOut() {
-    setApiKey("");
-    setWallet("");
+  function resetAccount(preserveSelection = false) {
+    closeProject(preserveSelection);
+    clearActions();
+    accountEpochRef.current++;
+    setAccountEpoch(accountEpochRef.current);
+    inputHandlers.current = {};
+    busyRef.current = false;
+    setAiStateRaw({ label: "idle", working: false });
+    setChatText("");
+    setBoard(null);
+    setMedia(null);
+    setCredits(null);
     setModels([]);
     setCatalogRevision(null);
     setCatalogAvailable(false);
     setCatalogLimits({});
-    localStorage.removeItem("pioneer_studio_wallet");
-    try { sessionStorage.removeItem(WALLET_SESSION_KEY); } catch { /* storage disabled */ }
-    // an open cloud project holds the old key — keep syncing and the next
-    // person's edits would land in the signed-out account's project
-    closeProject();
+    catalogRefreshAt.current = 0;
+    setPendingAgent(null);
+    agentHistoryRef.current = [];
+    setThread([]);
+    setSuggestions({ chat: [], board: [], script: [], create: [], animate: [], head: [], studio: [], media: [], models: [], projects: [], companies: [], settings: [] });
+  }
+
+  function acceptCredential(key: string, session: WalletSession | null) {
+    // An active cloud project captures its credential. Drop it before switching identities.
+    resetAccount(!apiKeyRef.current);
+    clearWalletSession();
+    apiKeyRef.current = key;
+    setApiKey(key);
+    setWalletSession(session);
+    setWallet(session?.address ?? "");
+    setKeyDraft("");
+    if (session) saveWalletSession(session, rememberRef.current);
+  }
+
+  function cancelSignIn() {
+    authAttempt.current?.abort();
+    authAttempt.current = null;
+    setAuthProgress("");
+    setAuthDetail("");
+    setAuthError("Sign-in cancelled. Dismiss any open wallet request before retrying.");
+  }
+
+  function signInError(error: any): string {
+    if (error?.code === 4001) return "Sign-in was cancelled in your wallet. Retry when ready.";
+    if (error?.code === -32002) return "A wallet request is already open. Finish or dismiss it in your wallet, then retry.";
+    const message = String(error?.message || error);
+    return message.includes("Signature does not match address")
+      ? `${message}. KeepKey account changed. Open KeepKey and click Refresh, then connect again.`
+      : message;
+  }
+
+  async function onConnectWallet(choice: WalletChoice = "auto") {
+    if (authAttempt.current) return;
+    const attempt = new AbortController();
+    authAttempt.current = attempt;
+    setAuthError("");
+    setAuthDetail("");
+    try {
+      const session = await connectWallet({
+        choice,
+        signal: attempt.signal,
+        onProgress: (phase) => {
+          if (authAttempt.current === attempt) setAuthProgress({ connecting: "Connecting to wallet…", signing: "Confirm sign-in in your wallet…", verifying: "Verifying wallet sign-in…" }[phase]);
+        },
+        onAccount: ({ address, provider }) => {
+          if (authAttempt.current === attempt) setAuthDetail(`${provider} · ${address}`);
+        },
+      });
+      if (authAttempt.current !== attempt || attempt.signal.aborted) return;
+      acceptCredential(session.token, session);
+      toast(`Wallet connected · ${session.address.slice(0, 6)}…${session.address.slice(-4)}`, "gold");
+    } catch (error) {
+      if (authAttempt.current === attempt && !attempt.signal.aborted) setAuthError(signInError(error));
+    } finally {
+      if (authAttempt.current === attempt) { authAttempt.current = null; setAuthProgress(""); }
+    }
+  }
+
+  async function onManualKey() {
+    const key = keyDraft.trim();
+    if (!key || authAttempt.current) return;
+    const attempt = new AbortController();
+    authAttempt.current = attempt;
+    setAuthError("");
+    setAuthDetail("");
+    setAuthProgress("Checking Pioneer key…");
+    try {
+      await fetchAccount(key);
+      if (authAttempt.current !== attempt || attempt.signal.aborted) return;
+      acceptCredential(key, null);
+      toast("Pioneer key connected", "ok");
+    } catch (error) {
+      if (authAttempt.current === attempt && !attempt.signal.aborted) setAuthError(signInError(error));
+    } finally {
+      if (authAttempt.current === attempt) { authAttempt.current = null; setAuthProgress(""); }
+    }
+  }
+
+  function onRemember(checked: boolean) {
+    setRemember(checked);
+    rememberRef.current = checked;
+    setRememberWalletPreference(checked);
+    if (walletSession) saveWalletSession(walletSession, checked);
+  }
+
+  function signOut() {
+    authAttempt.current?.abort();
+    authAttempt.current = null;
+    apiKeyRef.current = "";
+    setApiKey("");
+    setWallet("");
+    setWalletSession(null);
+    setKeyDraft("");
+    setAuthProgress("");
+    setAuthDetail("");
+    setAuthError("");
+    clearWalletSession();
+    resetAccount();
     refreshBoard();
   }
 
@@ -343,10 +449,12 @@ function App() {
     setThread((t) => [...t, { id: nextId.current++, kind: who === "You" ? "user" : "ai", text }]);
   }
   async function streamMsg(text: string) {
+    const epoch = accountEpochRef.current;
     const id = nextId.current++;
     setThread((t) => [...t, { id, kind: "ai", text: "" }]);
     let acc = "";
     for (const w of text.split(" ")) {
+      if (epoch !== accountEpochRef.current) return;
       acc += (acc ? " " : "") + w;
       const part = acc;
       setThread((t) => t.map((m) => (m.id === id ? { ...m, text: part } : m)));
@@ -355,6 +463,8 @@ function App() {
   }
   async function waitForJob(jobId: string, onPoll?: (s: JobStatus) => void): Promise<{ url: string; contentType: string }> {
     const key = apiKeyRef.current;
+    const epoch = accountEpochRef.current;
+    const checkAccount = () => { if (key !== apiKeyRef.current || epoch !== accountEpochRef.current) throw new Error("Account changed; reopen the job from its original account."); };
     // Backoff, not a flat 3s. The old loop slept 3000ms *before* its first poll,
     // so even a job that finished in 1.9s (a short TTS line) could not be
     // observed done until t+3s — pure dead air on every fast job in the app.
@@ -363,11 +473,14 @@ function App() {
     let wait = 400;
     for (;;) {
       await sleep(wait);
+      checkAccount();
       wait = Math.min(3000, wait * 1.6);
       const s = await pollJob(key, jobId);
+      checkAccount();
       onPoll?.(s);
       if (s.status === "done") {
         const r = await fetchResultUrl(key, jobId);
+        checkAccount();
         refreshMedia(); // format=url stored the result to R2
         refreshCredits();
         return r;
@@ -425,6 +538,7 @@ function App() {
           const id = String(params?.id || "").trim();
           if (!id) throw new Error("project id is required");
           const doc = await openProject(apiKey, id);
+          if (apiKeyRef.current !== apiKey) throw new Error("Account changed while opening this project.");
           setBoard(doc);
           setMode("board");
           return { id: doc.id, title: doc.title, rev: doc.rev, beats: doc.shots.length };
@@ -443,44 +557,35 @@ function App() {
     ]);
   }, [mode, apiKey, wallet, credits, board, models, media, catalogAvailable]);
 
+  const accountActive = () => apiKeyRef.current === apiKey && accountEpochRef.current === accountEpoch;
   const ps: PS = {
-    apiKey,
-    models,
-    catalogRevision,
-    catalogAvailable,
-    catalogLimits,
-    refreshModels,
-    media,
-    refreshMedia,
-    board,
-    setBoard,
-    refreshBoard,
-    mode,
-    setMode,
-    charge,
-    refreshCredits,
-    toast,
-    addMsg,
-    streamMsg,
-    setAiState: (label, working) => setAiStateRaw({ label, working }),
-    registerSuggestions: (m, arr) => setSuggestions((s) => ({ ...s, [m]: arr })),
-    setInputHandler: (m, fn) => {
-      inputHandlers.current[m] = fn;
-    },
-    isBusy: () => busyRef.current,
-    setBusy: (b) => {
-      busyRef.current = b;
-    },
-    waitForJob,
+    apiKey, models, catalogRevision, catalogAvailable, catalogLimits, media, board, mode,
+    refreshModels: (force) => accountActive() ? refreshModels(force) : Promise.resolve(),
+    refreshMedia: () => { if (accountActive()) refreshMedia(); },
+    setBoard: (doc) => { if (accountActive()) setBoard(doc); },
+    refreshBoard: () => { if (accountActive()) refreshBoard(); },
+    setMode: (next) => { if (accountActive()) setMode(next); },
+    charge: (remaining) => { if (accountActive()) charge(remaining); },
+    refreshCredits: () => { if (accountActive()) refreshCredits(); },
+    toast: (message, kind) => { if (accountActive()) toast(message, kind); },
+    addMsg: (who, text) => { if (accountActive()) addMsg(who, text); },
+    streamMsg: (text) => accountActive() ? streamMsg(text) : Promise.resolve(),
+    setAiState: (label, working) => { if (accountActive()) setAiStateRaw({ label, working }); },
+    registerSuggestions: (m, arr) => { if (accountActive()) setSuggestions((s) => ({ ...s, [m]: arr })); },
+    setInputHandler: (m, fn) => { if (accountActive()) inputHandlers.current[m] = fn; },
+    isBusy: () => !accountActive() || busyRef.current,
+    setBusy: (busy) => { if (accountActive()) busyRef.current = busy; },
+    waitForJob: (jobId, onPoll) => accountActive() ? waitForJob(jobId, onPoll) : Promise.reject(new Error("Account changed; reopen the job from its original account.")),
   };
 
   function rememberAgentTurn(turn: StudioAgentTurn) {
     agentHistoryRef.current = [...turn.messages.filter((message) => message.role !== "system"), turn.assistant].slice(-30);
   }
 
-  async function runAgentLoop(initial: StudioAgentTurn) {
+  async function runAgentLoop(initial: StudioAgentTurn, key: string, epoch: number) {
     let turn = initial;
     for (let round = 0; round < 8; round++) {
+      if (epoch !== accountEpochRef.current || key !== apiKeyRef.current) return;
       if (!turn.actions.length) {
         rememberAgentTurn(turn);
         await streamMsg(turn.assistant.content || "Done.");
@@ -490,7 +595,11 @@ function App() {
       const safe = turn.actions.filter((action) => !action.confirmation);
       const guarded = turn.actions.filter((action) => !!action.confirmation);
       const completed: StudioActionResult[] = [];
-      for (const action of safe) completed.push(await executeStudioAction(action));
+      for (const action of safe) {
+        if (epoch !== accountEpochRef.current || key !== apiKeyRef.current) return;
+        completed.push(await executeStudioAction(action));
+      }
+      if (epoch !== accountEpochRef.current || key !== apiKeyRef.current) return;
       if (guarded.length) {
         setPendingAgent({ turn, completed, actions: guarded });
         addMsg(
@@ -502,8 +611,9 @@ function App() {
       const ordered = turn.actions
         .map((action) => completed.find((result) => result.action.call.id === action.call.id))
         .filter((result): result is StudioActionResult => !!result);
-      turn = await continueStudioAgentTurn(apiKeyRef.current, turn, ordered);
+      turn = await continueStudioAgentTurn(key, turn, ordered);
     }
+    if (epoch !== accountEpochRef.current || key !== apiKeyRef.current) return;
     rememberAgentTurn(turn);
     await streamMsg("I stopped after eight action rounds so the Studio stays under your control. You can ask me to continue.");
   }
@@ -511,6 +621,8 @@ function App() {
   async function sendCopilot() {
     const v = chatText.trim();
     if (!v || busyRef.current || pendingAgent) return;
+    const key = apiKeyRef.current;
+    const epoch = accountEpochRef.current;
     setChatText("");
     // ChatView is still the generation planner. Everywhere else the rail is a
     // real tool-calling copilot over the shared action registry.
@@ -519,40 +631,52 @@ function App() {
     busyRef.current = true;
     setAiStateRaw({ label: "planning", working: true });
     try {
-      const turn = await beginStudioAgentTurn(apiKeyRef.current, v, {
+      const turn = await beginStudioAgentTurn(key, v, {
         mode,
         board,
         media,
         history: agentHistoryRef.current,
       });
-      await runAgentLoop(turn);
+      await runAgentLoop(turn, key, epoch);
     } catch (error: any) {
+      if (epoch !== accountEpochRef.current) return;
       addMsg("Copilot", `I couldn't run that: ${String(error?.message || error)}`);
     } finally {
-      busyRef.current = false;
-      setAiStateRaw({ label: "idle", working: false });
+      if (epoch === accountEpochRef.current) {
+        busyRef.current = false;
+        setAiStateRaw({ label: "idle", working: false });
+      }
     }
   }
 
   async function confirmAgentActions() {
     const pending = pendingAgent;
     if (!pending || busyRef.current) return;
+    const key = apiKeyRef.current;
+    const epoch = accountEpochRef.current;
     setPendingAgent(null);
     busyRef.current = true;
     setAiStateRaw({ label: "running actions", working: true });
     try {
       const results = [...pending.completed];
-      for (const action of pending.actions) results.push(await executeStudioAction(action));
+      for (const action of pending.actions) {
+        if (epoch !== accountEpochRef.current || key !== apiKeyRef.current) return;
+        results.push(await executeStudioAction(action));
+      }
+      if (epoch !== accountEpochRef.current || key !== apiKeyRef.current) return;
       const ordered = pending.turn.actions
         .map((action) => results.find((result) => result.action.call.id === action.call.id))
         .filter((result): result is StudioActionResult => !!result);
-      const next = await continueStudioAgentTurn(apiKeyRef.current, pending.turn, ordered);
-      await runAgentLoop(next);
+      const next = await continueStudioAgentTurn(key, pending.turn, ordered);
+      await runAgentLoop(next, key, epoch);
     } catch (error: any) {
+      if (epoch !== accountEpochRef.current) return;
       addMsg("Copilot", `The confirmed action failed: ${String(error?.message || error)}`);
     } finally {
-      busyRef.current = false;
-      setAiStateRaw({ label: "idle", working: false });
+      if (epoch === accountEpochRef.current) {
+        busyRef.current = false;
+        setAiStateRaw({ label: "idle", working: false });
+      }
     }
   }
 
@@ -572,6 +696,11 @@ function App() {
     { m: "studio", label: "Studio", icon: IcStudio },
   ];
 
+  const signIn = {
+    remember, onRemember, progress: authProgress, detail: authDetail, error: authError,
+    onConnect: onConnectWallet, onCancel: cancelSignIn, keyDraft, onKeyDraft: setKeyDraft, onKeySubmit: onManualKey,
+  };
+
   // Nothing in the studio works without a key: every view calls the API, and
   // without one they each failed separately and late — a mic opened, a job was
   // composed, and only then did "Add your Pioneer key in Settings first" appear.
@@ -587,24 +716,7 @@ function App() {
             <img src="/compass-icon.svg" alt="" /> Pioneer <span className="sub">Studio</span>
           </div>
           <p className="gate-lede">Storyboards, 3D cutscenes and talking characters, rendered on Pioneer's GPUs.</p>
-          <button type="button" className="gate-connect" onClick={onConnectWallet}>
-            Connect wallet
-          </button>
-          <p className="gate-note">Signs a challenge in your wallet — no password, nothing uploaded.</p>
-          <div className="gate-or">or paste a key</div>
-          {/* a lone password field outside a form makes browsers warn and
-              password managers behave oddly — submitting is a no-op, the key
-              is read on change */}
-          <form onSubmit={(e) => e.preventDefault()}>
-            <input
-              type="password"
-              className="gate-key"
-              name="pioneer-key"
-              placeholder="sk-pioneer-…"
-              autoComplete="off"
-              onChange={(e) => onManualKey(e.target.value.trim())}
-            />
-          </form>
+          <SignInForm {...signIn} />
           <p className="gate-note">
             No key? Mint one at <b>alpha.pioneers.dev/keys</b>.
           </p>
@@ -647,7 +759,7 @@ function App() {
           <div className="pill">
             <span className="lbl">R2</span> <span>{usedGb.toFixed(2)}</span> GB
           </div>
-          <button type="button" className={`pill${wallet ? " on" : ""}`} onClick={onConnectWallet} title="Sign in with your wallet (challenge → sign → JWT)">
+          <button type="button" className={`pill${wallet ? " on" : ""}`} onClick={() => setMode("settings")} title="Account and sign-in settings">
             <span className="lbl">Wallet</span>
             <b>{wallet ? `${wallet.slice(0, 6)}…${wallet.slice(-4)}` : "Connect"}</b>
           </button>
@@ -703,7 +815,7 @@ function App() {
       </div>
 
       {/* WORK AREA — all views stay mounted so jobs keep polling across modes */}
-      <div className="work">
+      <div className="work" key={accountEpoch}>
         <div className={`view${mode === "chat" ? " active" : ""}`} id="view-chat">
           <ChatView ps={ps} />
         </div>
@@ -742,7 +854,7 @@ function App() {
           <CompaniesView ps={ps} />
         </div>
         <div className={`view${mode === "settings" ? " active" : ""}`} id="view-settings">
-          <SettingsView ps={ps} auth={{ apiKey, setApiKey: onManualKey, wallet, onConnectWallet, signOut, credits, usedGb, mediaCount }} />
+          <SettingsView ps={ps} auth={{ hasCredential: !!apiKey, wallet, signOut, credits, usedGb, mediaCount, signIn }} />
         </div>
       </div>
 

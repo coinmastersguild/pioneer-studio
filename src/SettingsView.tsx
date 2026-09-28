@@ -1,13 +1,13 @@
 import { API_BASE } from "./api";
+import SignInForm, { type SignInFormProps } from "./SignInForm";
 import { type PS } from "./shared";
 
 // Auth/account state lives in App (it's app-wide, not per-view), so Settings
 // receives it directly rather than through the PS view contract.
 export type SettingsAuth = {
-  apiKey: string;
-  setApiKey: (k: string) => void;
+  hasCredential: boolean;
+  signIn: SignInFormProps;
   wallet: string;
-  onConnectWallet: () => void;
   signOut: () => void;
   credits: number | null;
   usedGb: number;
@@ -24,14 +24,14 @@ function clearLocalData() {
 }
 
 export default function SettingsView({ ps, auth }: { ps: PS; auth: SettingsAuth }) {
-  const { apiKey, setApiKey, wallet, onConnectWallet, signOut, credits, usedGb, mediaCount } = auth;
+  const { hasCredential, wallet, signOut, credits, usedGb, mediaCount, signIn } = auth;
 
   return (
     <div className="media-wrap">
       <div className="media-head">
         <div>
           <h2>Settings</h2>
-          <div className="sub">Your account, sign-in, and local data. Nothing here leaves this browser except the key you send with each request.</div>
+          <div className="sub">Your account, sign-in, and local project data.</div>
         </div>
       </div>
 
@@ -54,37 +54,15 @@ export default function SettingsView({ ps, auth }: { ps: PS; auth: SettingsAuth 
         <div className="bill-card">
           <span className="eyebrow">Wallet</span>
           <div className="stat-value" style={{ fontSize: 16 }}>{wallet ? `${wallet.slice(0, 6)}…${wallet.slice(-4)}` : "not connected"}</div>
-          <div className="foot-note">
-            <button type="button" className="btn" onClick={onConnectWallet}>
-              {wallet ? "Reconnect" : "Connect wallet"}
-            </button>
-          </div>
+
         </div>
       </div>
 
       {/* Sign-in / key */}
       <div style={{ marginBottom: 22 }}>
         <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Sign in</h3>
-        <div className="sub" style={{ marginBottom: 10 }}>
-          Paste an <code>sk-pioneer-…</code> key, or connect a wallet above. Wallet sign-in survives reloads in this tab for up to 12 hours; sign-out clears it. Pasted keys stay only in page memory.
-        </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", maxWidth: 560 }}>
-          <input
-            type="password"
-            placeholder="sk-pioneer-…"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            style={{
-              flex: 1, padding: "9px 12px", fontSize: 13, borderRadius: "var(--radius-md)",
-              border: "1px solid var(--border-strong)", background: "var(--bg-accent)", color: "var(--fg1)",
-            }}
-          />
-          {apiKey && (
-            <button type="button" className="btn" onClick={signOut}>
-              Sign out
-            </button>
-          )}
-        </div>
+        <SignInForm {...signIn} />
+        {hasCredential && <button type="button" className="btn" style={{ marginTop: 12 }} onClick={signOut}>Sign out</button>}
       </div>
 
       {/* Backend + local data */}

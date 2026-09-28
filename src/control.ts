@@ -21,6 +21,10 @@ export type ControlAction = {
 
 const registry = new Map<string, ControlAction>();
 
+export function clearActions(): void {
+  registry.clear();
+}
+
 export function registerActions(actions: ControlAction[]): void {
   for (const a of actions) registry.set(a.name, a);
 }

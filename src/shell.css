@@ -230,3 +230,14 @@ svg.ic{ width:15px; height:15px; stroke:currentColor; stroke-width:1.5; fill:non
 .preview-unavailable{ margin:auto; padding:32px; max-width:480px; color:var(--fg2); text-align:center; }
 .preview-unavailable strong{ color:var(--fg1); }
 .preview-unavailable p{ line-height:1.5; }
+
+.sign-in-form{ width:100%; max-width:560px; }
+.sign-in-form fieldset{ border:0; padding:0; margin:0; min-width:0; display:flex; flex-direction:column; gap:12px; }
+.sign-in-form fieldset:disabled{ opacity:.65; }
+.sign-in-wallets{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.sign-in-wallets .gate-connect{ flex:1; width:auto; margin:0; }
+.sign-in-form form{ display:flex; gap:8px; }
+.sign-in-form form .gate-key{ min-width:0; flex:1; }
+.remember-wallet{ display:flex; gap:8px; align-items:center; font-size:12px; cursor:pointer; }
+.sign-in-progress{ display:flex; flex-direction:column; align-items:flex-start; gap:8px; margin-top:12px; font-size:12px; overflow-wrap:anywhere; }
+.sign-in-error{ margin-top:12px; padding:12px; border:1px solid var(--border-strong); border-radius:var(--radius-md); color:var(--fg1); font-size:12px; line-height:1.5; overflow-wrap:anywhere; }
