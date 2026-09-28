@@ -531,18 +531,23 @@ export async function openProject(apiKey: string, id: string): Promise<Storyboar
   return structuredClone(doc);
 }
 
-// Re-open the project that was active before a reload. True when restored.
-export async function restoreActiveProject(apiKey: string): Promise<boolean> {
+/** Open the editor containing authored work; storyboard projects keep their usual landing. */
+export function projectOpeningMode(doc: Pick<Storyboard, "shots" | "studioTimeline">): "board" | "studio" {
+  const timeline = doc.studioTimeline as { clips?: unknown } | null | undefined;
+  return !doc.shots.length && Array.isArray(timeline?.clips) && timeline.clips.length > 0 ? "studio" : "board";
+}
+
+// Re-open the project that was active before a reload and return its document.
+export async function restoreActiveProject(apiKey: string): Promise<Storyboard | null> {
   const id = localStorage.getItem("ps_active_project");
   const generation = projectGeneration;
-  if (!id || activeProject) return false;
+  if (!id || activeProject) return null;
   try {
-    await openProject(apiKey, id);
-    return true;
+    return await openProject(apiKey, id);
   } catch {
     // A stale rejection must not clear the selection made by the new account.
     if (generation === projectGeneration && localStorage.getItem("ps_active_project") === id) localStorage.removeItem("ps_active_project");
-    return false;
+    return null;
   }
 }
 

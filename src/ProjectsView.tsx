@@ -8,6 +8,7 @@ import {
   listMyCompanies,
   listProjects,
   openProject,
+  projectOpeningMode,
   type Company,
   type ProjectSummary,
 } from "./api";
@@ -16,7 +17,7 @@ import { relTime, type PS } from "./shared";
 // Lists the user's companies and every project they can see — personal ones
 // plus every company's shared projects (the server returns those for any
 // member, so a company's work shows up automatically on login). Opening a
-// project loads its doc into the storyboard and jumps to that view.
+// project loads its document and opens the editor containing authored work.
 export default function ProjectsView({ ps }: { ps: PS }) {
   const [companies, setCompanies] = useState<Company[]>([]);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -62,9 +63,9 @@ export default function ProjectsView({ ps }: { ps: PS }) {
 
   async function open(id: string) {
     try {
-      await openProject(ps.apiKey, id);
-      ps.refreshBoard();
-      ps.setMode("board");
+      const doc = await openProject(ps.apiKey, id);
+      ps.setBoard(doc);
+      ps.setMode(projectOpeningMode(doc));
       ps.toast("Project opened", "gold");
     } catch (e: any) {
       ps.toast(String(e.message || e));
