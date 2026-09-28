@@ -605,6 +605,7 @@ export function nudgeClip(timeline: StudioTimeline, id: string, delta: number): 
 
 export type StudioExportPlan = {
   version: 2;
+  output?: "portrait" | "square" | "landscape";
   clips: Array<{
     url: string;
     kind: StudioClipKind;
@@ -626,7 +627,7 @@ export type StudioExportCheck =
 /** Compile the canonical cut to assemble v2. Track order is converted to
  * bottom-to-top visual input order so sequential server overlays preserve the
  * monitor's z-order. Track/master gain and mute are flattened into each clip. */
-export function buildStudioExportPlan(timeline: StudioTimeline): StudioExportCheck {
+export function buildStudioExportPlan(timeline: StudioTimeline, output?: StudioExportPlan["output"]): StudioExportCheck {
   const doc = normalizeStudioTimeline(timeline);
   const issues: string[] = [];
   const trackById = new Map(doc.tracks.map((track) => [track.id, track]));
@@ -650,6 +651,7 @@ export function buildStudioExportPlan(timeline: StudioTimeline): StudioExportChe
     ok: true,
     plan: {
       version: 2,
+      ...(output ? { output } : {}),
       duration,
       clips: ordered.map((clip) => ({
         url: clip.url!,

@@ -124,7 +124,7 @@ function toEShots(shots: Shot[], pipe: Pipeline): EShot[] {
 
 function visualStyle(clip?: StudioClip): React.CSSProperties {
   if (clip?.url && clip.kind === "image") {
-    return { backgroundImage: `url(${clip.url})`, backgroundSize: "cover", backgroundPosition: "center" };
+    return { backgroundImage: `url(${clip.url})`, backgroundSize: "contain", backgroundRepeat: "no-repeat", backgroundPosition: "center", backgroundColor: "#000" };
   }
   return { background: "radial-gradient(60% 45% at 48% 58%,rgba(74,222,128,.2),transparent 70%),linear-gradient(180deg,#0a1508,#05080a)" };
 }
@@ -193,6 +193,7 @@ export default function StudioView({ ps }: { ps: PS }) {
   const [menu, setMenu] = useState<null | "model">(null);
   const [curModel, setCurModel] = useState(() => pickModel(ps.models, "image")?.model || "");
   const [exporting, setExporting] = useState(false);
+  const [output, setOutput] = useState<"portrait" | "square" | "landscape">("landscape");
   const [closed, setClosed] = useState<Record<string, boolean>>({});
   const [promptDraft, setPromptDraft] = useState<string | null>(null);
   const [assetCat, setAssetCat] = useState("All");
@@ -971,7 +972,7 @@ export default function StudioView({ ps }: { ps: PS }) {
   async function exportTimeline() {
     const p = psRef.current;
     if (!p.apiKey) return p.toast("Paste your sk-pioneer key first (Settings)");
-    const check = buildStudioExportPlan(timelineRef.current);
+    const check = buildStudioExportPlan(timelineRef.current, output);
     if (!check.ok) {
       const more = check.issues.length > 1 ? ` (+${check.issues.length - 1} more)` : "";
       return p.toast(`Can't export this cut yet: ${check.issues[0]}${more}`);
@@ -984,7 +985,7 @@ export default function StudioView({ ps }: { ps: PS }) {
       const url = result.job_id ? (await p.waitForJob(result.job_id)).url : result.url;
       if (!url) return p.toast("The export completed without a release URL");
       const next = loadPipeline(projectId);
-      next.release = { url, duration: check.plan.duration, createdAt: new Date().toISOString() };
+      next.release = { url, duration: check.plan.duration, output, sha256: result.sha256, createdAt: new Date().toISOString() };
       savePipeline(projectId, next);
       setPipe(next);
       if (typeof result.credits_remaining === "number") p.charge(result.credits_remaining);
@@ -1119,7 +1120,7 @@ export default function StudioView({ ps }: { ps: PS }) {
   const modelOpts = [...new Set(ps.models.map((model) => model.model))];
   const linkedMeta = cur ? statusMeta(cur.status) : { cls: "st-draft", label: "—" };
   const clipBoundaries = [...new Set(clips.flatMap((clip) => [clip.start, clip.start + clip.duration]))].sort((a, b) => a - b);
-  const exportCheck = useMemo(() => buildStudioExportPlan(timeline), [timeline]);
+  const exportCheck = useMemo(() => buildStudioExportPlan(timeline, output), [timeline, output]);
 
   return (
     <div className="st-app" ref={root}>
@@ -1127,7 +1128,7 @@ export default function StudioView({ ps }: { ps: PS }) {
         <div className="proj">
           <div className="t">{ps.board?.title || "Untitled Storyboard"}</div>
           <div className="s">
-            16:9 · 00:00–{fmtTime(END || 0)} · {pipe.release
+            {{ portrait: "9:16", square: "1:1", landscape: "16:9" }[output]} · 00:00–{fmtTime(END || 0)} · {pipe.release
               ? <a href={pipe.release.url} target="_blank" rel="noreferrer">last export ↗</a>
               : "edit saved locally"}
           </div>
@@ -1155,6 +1156,11 @@ export default function StudioView({ ps }: { ps: PS }) {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}><path d="M5 3l14 9-14 9V3z" /></svg>
           Render beats
         </button>
+        <select className="btn" aria-label="Export format" value={output} onChange={(event) => setOutput(event.target.value as typeof output)} disabled={exporting}>
+          <option value="portrait">Portrait 9:16</option>
+          <option value="square">Square 1:1</option>
+          <option value="landscape">Landscape 16:9</option>
+        </select>
         <button
           type="button"
           className={`btn export-check${exportCheck.ok ? " ready" : ""}`}
@@ -1281,7 +1287,7 @@ export default function StudioView({ ps }: { ps: PS }) {
             </div>
           </div>
           <div className="stagewrap">
-            <div className="monitor" ref={monitorRef}>
+            <div className="monitor" ref={monitorRef} style={{ aspectRatio: output === "portrait" ? "9 / 16" : output === "square" ? "1 / 1" : "16 / 9" }}>
               <div className="frame-bg" style={visualStyle(mon)} />
               {mon?.kind === "video" && mon.url && (
                 <video key={mon.id} ref={monVideoRef} className="frame-bg" src={mon.url} muted={mon.muted} playsInline preload="auto" />

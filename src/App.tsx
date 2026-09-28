@@ -79,6 +79,17 @@ type Toast = { id: number; msg: string; kind?: "ok" | "gold"; out?: boolean };
 type PendingAgentTurn = { turn: StudioAgentTurn; completed: StudioActionResult[]; actions: PreparedStudioAction[] };
 
 const MODE_LABEL: Record<Mode, string> = { chat: "chat", board: "storyboard", script: "script", create: "create", animate: "animation", head: "talking head", studio: "studio", media: "media", models: "models", projects: "projects", companies: "companies", settings: "settings" };
+const WALLET_SESSION_KEY = "pioneer_studio_wallet_session";
+
+function savedWalletSession(): { token: string; address: string } | null {
+  try {
+    const value = JSON.parse(sessionStorage.getItem(WALLET_SESSION_KEY) || "null");
+    if (typeof value?.token === "string" && typeof value?.address === "string" &&
+        Number.isFinite(value?.expiresAt) && value.expiresAt > Date.now()) return value;
+    sessionStorage.removeItem(WALLET_SESSION_KEY);
+  } catch { /* invalid or disabled storage */ }
+  return null;
+}
 
 function App() {
   // Dev-only credential seed. Without it an agent driving the /mcp
@@ -87,8 +98,8 @@ function App() {
   // doesn't require a human typing into Settings. `import.meta.env.DEV` is
   // false in `vite build`, the same guard the MCP plugin itself uses, so this
   // never reaches production and nothing is persisted.
-  const [apiKey, setApiKey] = useState(() => (import.meta.env.DEV && import.meta.env.VITE_PIONEER_API) || "");
-  const [wallet, setWallet] = useState(() => localStorage.getItem("pioneer_studio_wallet") || "");
+  const [apiKey, setApiKey] = useState(() => (import.meta.env.DEV && import.meta.env.VITE_PIONEER_API) || savedWalletSession()?.token || "");
+  const [wallet, setWallet] = useState(() => savedWalletSession()?.address || localStorage.getItem("pioneer_studio_wallet") || "");
   const [mode, setMode] = useState<Mode>("chat");
   const [models, setModels] = useState<JobModel[]>([]);
   const [catalogRevision, setCatalogRevision] = useState<string | null>(null);
@@ -139,12 +150,20 @@ function App() {
   // only fires until it succeeds (Settings writes apiKey on every keystroke).
   const deepLinkedProject = useRef(new URLSearchParams(location.search).get("project"));
 
-  // Purge credentials persisted by older builds. Credentials now stay only in
-  // React memory and disappear on reload or sign-out. The wallet address is
-  // public and may remain remembered.
+  // Purge old persistent credentials. The wallet session is scoped to this
+  // browser tab and expires after at most twelve hours.
   useEffect(() => {
     localStorage.removeItem("pioneer_studio_api_key");
     sessionStorage.removeItem("pioneer_studio_api_key");
+  }, []);
+
+  useEffect(() => {
+    const session = savedWalletSession();
+    if (!session) return;
+    fetchAccount(session.token).catch((error) => {
+      if (String(error).includes("account: 401")) signOut();
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Invite link (/?join=<companyAddress>) opens the Companies page, which
@@ -282,14 +301,25 @@ function App() {
 
   async function onConnectWallet() {
     try {
-      const { token, address } = await connectWallet();
+      const { token, address, expiresAt } = await connectWallet();
       setApiKey(token);
       setWallet(address);
       localStorage.setItem("pioneer_studio_wallet", address);
+      try {
+        sessionStorage.setItem(WALLET_SESSION_KEY, JSON.stringify({
+          token, address, expiresAt: Math.min(expiresAt * 1000, Date.now() + 12 * 60 * 60 * 1000),
+        }));
+      } catch { /* Browsers with disabled storage still work until reload. */ }
       toast(`Wallet connected · ${address.slice(0, 6)}…${address.slice(-4)}`, "gold");
     } catch (e: any) {
       toast(String(e.message || e));
     }
+  }
+
+  function onManualKey(key: string) {
+    try { sessionStorage.removeItem(WALLET_SESSION_KEY); } catch { /* storage disabled */ }
+    setWallet("");
+    setApiKey(key);
   }
 
   function signOut() {
@@ -300,6 +330,7 @@ function App() {
     setCatalogAvailable(false);
     setCatalogLimits({});
     localStorage.removeItem("pioneer_studio_wallet");
+    try { sessionStorage.removeItem(WALLET_SESSION_KEY); } catch { /* storage disabled */ }
     // an open cloud project holds the old key — keep syncing and the next
     // person's edits would land in the signed-out account's project
     closeProject();
@@ -570,7 +601,7 @@ function App() {
               name="pioneer-key"
               placeholder="sk-pioneer-…"
               autoComplete="off"
-              onChange={(e) => setApiKey(e.target.value.trim())}
+              onChange={(e) => onManualKey(e.target.value.trim())}
             />
           </form>
           <p className="gate-note">
@@ -706,7 +737,7 @@ function App() {
           <CompaniesView ps={ps} />
         </div>
         <div className={`view${mode === "settings" ? " active" : ""}`} id="view-settings">
-          <SettingsView ps={ps} auth={{ apiKey, setApiKey, wallet, onConnectWallet, signOut, credits, usedGb, mediaCount }} />
+          <SettingsView ps={ps} auth={{ apiKey, setApiKey: onManualKey, wallet, onConnectWallet, signOut, credits, usedGb, mediaCount }} />
         </div>
       </div>
 

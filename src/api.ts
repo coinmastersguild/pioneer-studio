@@ -185,7 +185,10 @@ export async function deleteProject(apiKey: string, id: string): Promise<void> {
 type EthProvider = { request(a: { method: string; params?: unknown[] }): Promise<any> };
 
 function injectedProvider(): EthProvider | undefined {
-  return (window as unknown as { ethereum?: EthProvider }).ethereum;
+  const wallets = window as unknown as { ethereum?: EthProvider; keepkey?: { ethereum?: EthProvider } };
+  // KeepKey's browser extension exposes this stable namespace even when a
+  // different extension owns window.ethereum.
+  return wallets.keepkey?.ethereum ?? wallets.ethereum;
 }
 
 // Mobile Safari and Chrome never expose an injected provider — MetaMask only
@@ -236,7 +239,7 @@ export function primeMetaMaskSession(): void {
 
 // Wallet login: challenge → personal_sign → short-lived bearer token. The exact
 // message format is part of the public API contract and must remain stable.
-export async function connectWallet(): Promise<{ token: string; address: string }> {
+export async function connectWallet(): Promise<{ token: string; address: string; expiresAt: number }> {
   const injected = injectedProvider();
   if (!injected && !needsMetaMaskHandoff()) {
     throw new Error("No browser wallet found — install MetaMask/KeepKey, or paste an sk-pioneer key");
@@ -255,7 +258,7 @@ export async function connectWallet(): Promise<{ token: string; address: string 
   });
   const body = await res.json();
   if (!res.ok) throw new Error(body?.error || `verify: ${res.status}`);
-  return { token: body.token, address };
+  return { token: body.token, address, expiresAt: body.expiresAt };
 }
 
 export async function fetchModels(apiKey: string): Promise<ModelsResponse> {
