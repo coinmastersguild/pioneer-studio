@@ -6,6 +6,7 @@ import { sendToChat } from "./chatHandoff";
 import { openJobForm } from "./jobHandoff";
 import { sendPropToStage } from "./stageHandoff";
 import { makeGltfLoader } from "./props";
+import PreviewBoundary from "./PreviewBoundary";
 import { fmtBytes, GB, IcCopy, IcModels, IcMusic, kindOf, relTime, type PS } from "./shared";
 
 type Filter = "all" | "reference" | "result" | "clip" | "model" | "release";
@@ -119,7 +120,7 @@ function Preview({ o, onClose, toast, addToStage }: { o: MediaObject; onClose():
           {kind === "image" && <img src={o.url} alt={o.name} />}
           {kind === "video" && <video src={o.url} controls autoPlay loop />}
           {kind === "audio" && <audio src={o.url} controls autoPlay />}
-          {kind === "model" && <ModelPreview url={o.url} />}
+          {kind === "model" && <PreviewBoundary key={o.url} label="Model preview"><ModelPreview url={o.url} /></PreviewBoundary>}
         </div>
         <div className="ml-foot">
           <CopyBtn url={o.url} toast={toast} />

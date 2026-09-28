@@ -193,7 +193,6 @@ export default function StudioView({ ps }: { ps: PS }) {
   const [menu, setMenu] = useState<null | "model">(null);
   const [curModel, setCurModel] = useState(() => pickModel(ps.models, "image")?.model || "");
   const [exporting, setExporting] = useState(false);
-  const [output, setOutput] = useState<"portrait" | "square" | "landscape">("landscape");
   const [closed, setClosed] = useState<Record<string, boolean>>({});
   const [promptDraft, setPromptDraft] = useState<string | null>(null);
   const [assetCat, setAssetCat] = useState("All");
@@ -286,6 +285,7 @@ export default function StudioView({ ps }: { ps: PS }) {
     [storedProjectTimeline, canonicalSources],
   );
   const timeline = timelineState.projectId === projectId ? timelineState.doc : fallbackTimeline;
+  const output = timeline.output;
   const timelineRef = useRef(timeline);
   timelineRef.current = timeline;
 
@@ -972,7 +972,7 @@ export default function StudioView({ ps }: { ps: PS }) {
   async function exportTimeline() {
     const p = psRef.current;
     if (!p.apiKey) return p.toast("Paste your sk-pioneer key first (Settings)");
-    const check = buildStudioExportPlan(timelineRef.current, output);
+    const check = buildStudioExportPlan(timelineRef.current);
     if (!check.ok) {
       const more = check.issues.length > 1 ? ` (+${check.issues.length - 1} more)` : "";
       return p.toast(`Can't export this cut yet: ${check.issues[0]}${more}`);
@@ -985,7 +985,7 @@ export default function StudioView({ ps }: { ps: PS }) {
       const url = result.job_id ? (await p.waitForJob(result.job_id)).url : result.url;
       if (!url) return p.toast("The export completed without a release URL");
       const next = loadPipeline(projectId);
-      next.release = { url, duration: check.plan.duration, output, sha256: result.sha256, createdAt: new Date().toISOString() };
+      next.release = { url, duration: check.plan.duration, output: check.plan.output, sha256: result.sha256, createdAt: new Date().toISOString() };
       savePipeline(projectId, next);
       setPipe(next);
       if (typeof result.credits_remaining === "number") p.charge(result.credits_remaining);
@@ -1009,12 +1009,13 @@ export default function StudioView({ ps }: { ps: PS }) {
   }
 
   async function onUploadAsset(event: React.ChangeEvent<HTMLInputElement>) {
-    const files = event.target.files;
+    // Clearing the picker also clears its live FileList. Keep the selected files first.
+    const files = Array.from(event.target.files || []);
     event.target.value = "";
-    if (!files?.length) return;
+    if (!files.length) return;
     const p = psRef.current;
     if (!p.apiKey) return p.toast("Paste your sk-pioneer key first (Settings)");
-    for (const file of Array.from(files)) {
+    for (const file of files) {
       try {
         const uploaded = await uploadMedia(p.apiKey, file);
         p.charge(uploaded.credits_remaining);
@@ -1120,7 +1121,7 @@ export default function StudioView({ ps }: { ps: PS }) {
   const modelOpts = [...new Set(ps.models.map((model) => model.model))];
   const linkedMeta = cur ? statusMeta(cur.status) : { cls: "st-draft", label: "—" };
   const clipBoundaries = [...new Set(clips.flatMap((clip) => [clip.start, clip.start + clip.duration]))].sort((a, b) => a - b);
-  const exportCheck = useMemo(() => buildStudioExportPlan(timeline, output), [timeline, output]);
+  const exportCheck = useMemo(() => buildStudioExportPlan(timeline), [timeline]);
 
   return (
     <div className="st-app" ref={root}>
@@ -1156,7 +1157,10 @@ export default function StudioView({ ps }: { ps: PS }) {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}><path d="M5 3l14 9-14 9V3z" /></svg>
           Render beats
         </button>
-        <select className="btn" aria-label="Export format" value={output} onChange={(event) => setOutput(event.target.value as typeof output)} disabled={exporting}>
+        <select className="btn" aria-label="Export format" value={output} onChange={(event) => {
+          const selected = event.target.value as typeof output;
+          updateTimeline((doc) => ({ ...doc, output: selected }));
+        }} disabled={exporting}>
           <option value="portrait">Portrait 9:16</option>
           <option value="square">Square 1:1</option>
           <option value="landscape">Landscape 16:9</option>

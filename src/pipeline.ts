@@ -2,7 +2,7 @@
 // generation helper. State persists in localStorage per storyboard id.
 // Uses localStorage for local-only projects. The isolated load/save boundary can
 // be replaced with server-backed persistence without changing these data shapes.
-import { activeProjectPipeline, API_BASE, authHeaders, blobToDataUrl, captionImage, chatCompletion, saveActiveProjectPipeline, submitJob, uploadMedia, type JobModel, type JobStatus, type ChatMessage, type Shot } from "./api";
+import { activeProjectPipeline, API_BASE, apiFetch, authHeaders, blobToDataUrl, captionImage, chatCompletion, saveActiveProjectPipeline, submitJob, uploadMedia, type JobModel, type JobStatus, type ChatMessage, type Shot } from "./api";
 import { kindOf, type PS } from "./shared";
 import { classifyJobModel, preferredEntry, type JobCapability } from "./jobCatalog";
 import type { StudioExportPlan } from "./studioTimeline";
@@ -610,7 +610,7 @@ export async function ttsLine(ps: PS, text: string, voice?: VoiceRef): Promise<A
  *  earlier mint to get the SAME id back — the server content-addresses the
  *  reference audio, so re-minting after a cache eviction is not a new voice. */
 export async function mintVoice(apiKey: string, from: { voice_description: string } | { reference_audio: string }): Promise<{ voice_id: string; reference_audio: string }> {
-  const res = await fetch(`${API_BASE}/api/v1/voice`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/voice`, {
     method: "POST",
     headers: { ...authHeaders(apiKey), "content-type": "application/json" },
     body: JSON.stringify(from),
@@ -669,7 +669,7 @@ export async function speakAs(
 export const isVoiceGone = (err: unknown) => /^tts: 404$/.test(String((err as Error)?.message));
 
 async function ttsFetch(apiKey: string, text: string, voice?: VoiceRef, path = "/api/v1/tts", signal?: AbortSignal): Promise<Response> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await apiFetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: { ...authHeaders(apiKey), "content-type": "application/json" },
     body: JSON.stringify({ text, ...(voice ?? {}) }),
@@ -926,7 +926,7 @@ export async function assembleRelease(
   apiKey: string,
   timeline: StudioExportPlan,
 ): Promise<{ url?: string; job_id?: string; output?: string; sha256?: string; credits_remaining?: number | null } | null> {
-  const res = await fetch(`${API_BASE}/api/v1/storyboard/assemble`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/storyboard/assemble`, {
     method: "POST",
     headers: { ...authHeaders(apiKey), "content-type": "application/json" },
     body: JSON.stringify({ timeline }),

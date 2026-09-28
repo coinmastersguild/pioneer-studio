@@ -1,3 +1,4 @@
+import { walletSessionFromResponse, type WalletSession } from "./authSession";
 /** Public, metered Pioneer API. Users provide their own credential at runtime. */
 export const API_BASE = "https://alpha.pioneers.dev";
 
@@ -74,6 +75,21 @@ export function authHeaders(apiKey: string): Record<string, string> {
   return { Authorization: `Bearer ${apiKey}` };
 }
 
+let onAuthRejected: ((credential: string) => void) | undefined;
+export function setAuthErrorHandler(handler?: (credential: string) => void): void {
+  onAuthRejected = handler;
+}
+
+/** Notify the shell only for the credential rejected by an authenticated API call. */
+export async function apiFetch(input: string, init?: RequestInit): Promise<Response> {
+  const response = await fetch(input, init);
+  if (response.status === 401 && input.startsWith(`${API_BASE}/`)) {
+    const authorization = new Headers(init?.headers).get("authorization");
+    if (authorization?.startsWith("Bearer ")) onAuthRejected?.(authorization.slice(7));
+  }
+  return response;
+}
+
 export class ApiError extends Error {
   readonly status: number;
   constructor(message: string, status: number) {
@@ -114,7 +130,7 @@ export type ProjectSummary = {
 export type Project = ProjectSummary & { doc: Storyboard | null };
 
 export async function listMyCompanies(apiKey: string): Promise<Company[]> {
-  const res = await fetch(`${API_BASE}/api/v1/account/companies`, { headers: authHeaders(apiKey) });
+  const res = await apiFetch(`${API_BASE}/api/v1/account/companies`, { headers: authHeaders(apiKey) });
   if (!res.ok) throw new Error(`companies: ${res.status}`);
   return (await res.json()).companies ?? [];
 }
@@ -132,14 +148,14 @@ export type CompanyLeaderboardEntry = {
 
 // Public — no auth needed. Ranked by member count.
 export async function fetchCompanyLeaderboard(): Promise<CompanyLeaderboardEntry[]> {
-  const res = await fetch(`${API_BASE}/api/v1/companies/leaderboard`);
+  const res = await apiFetch(`${API_BASE}/api/v1/companies/leaderboard`);
   if (!res.ok) throw new Error(`leaderboard: ${res.status}`);
   return (await res.json()).companies ?? [];
 }
 
 // Request to join — creates a pending request the owner must approve.
 export async function joinCompany(apiKey: string, companyAddress: string): Promise<{ status: string }> {
-  const res = await fetch(`${API_BASE}/api/v1/companies/join`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/companies/join`, {
     method: "POST",
     headers: { ...authHeaders(apiKey), "content-type": "application/json" },
     body: JSON.stringify({ companyAddress }),
@@ -151,7 +167,7 @@ export async function joinCompany(apiKey: string, companyAddress: string): Promi
 
 // Owner-only: toggle public invites on/off.
 export async function setCompanyInvite(apiKey: string, companyAddress: string, openInvite: boolean): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/v1/companies/${companyAddress}/settings`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/companies/${companyAddress}/settings`, {
     method: "POST",
     headers: { ...authHeaders(apiKey), "content-type": "application/json" },
     body: JSON.stringify({ openInvite }),
@@ -161,13 +177,13 @@ export async function setCompanyInvite(apiKey: string, companyAddress: string, o
 }
 
 export async function listProjects(apiKey: string): Promise<ProjectSummary[]> {
-  const res = await fetch(`${API_BASE}/api/v1/projects`, { headers: authHeaders(apiKey) });
+  const res = await apiFetch(`${API_BASE}/api/v1/projects`, { headers: authHeaders(apiKey) });
   if (!res.ok) throw new Error(`projects: ${res.status}`);
   return (await res.json()).projects ?? [];
 }
 
 export async function createProject(apiKey: string, title: string, companyAddress?: string): Promise<Project> {
-  const res = await fetch(`${API_BASE}/api/v1/projects`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/projects`, {
     method: "POST",
     headers: { ...authHeaders(apiKey), "content-type": "application/json" },
     body: JSON.stringify({ title, companyAddress }),
@@ -178,17 +194,19 @@ export async function createProject(apiKey: string, title: string, companyAddres
 }
 
 export async function deleteProject(apiKey: string, id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${id}`, { method: "DELETE", headers: authHeaders(apiKey) });
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${id}`, { method: "DELETE", headers: authHeaders(apiKey) });
   if (!res.ok) throw new Error(`delete project: ${res.status}`);
 }
 
-type EthProvider = { request(a: { method: string; params?: unknown[] }): Promise<any> };
+export type EthProvider = { request(a: { method: string; params?: unknown[] }): Promise<any> };
+export type WalletChoice = "auto" | "keepkey" | "browser";
+export type WalletProgress = "connecting" | "signing" | "verifying";
 
-function injectedProvider(): EthProvider | undefined {
+function injectedProvider(choice: WalletChoice = "auto"): EthProvider | undefined {
   const wallets = window as unknown as { ethereum?: EthProvider; keepkey?: { ethereum?: EthProvider } };
-  // KeepKey's browser extension exposes this stable namespace even when a
-  // different extension owns window.ethereum.
-  return wallets.keepkey?.ethereum ?? wallets.ethereum;
+  const keepkey = typeof wallets.keepkey?.ethereum?.request === "function" ? wallets.keepkey.ethereum : undefined;
+  const browser = typeof wallets.ethereum?.request === "function" ? wallets.ethereum : undefined;
+  return choice === "keepkey" ? keepkey : choice === "browser" ? browser : keepkey ?? browser;
 }
 
 // Mobile Safari and Chrome never expose an injected provider — MetaMask only
@@ -239,36 +257,67 @@ export function primeMetaMaskSession(): void {
 
 // Wallet login: challenge → personal_sign → short-lived bearer token. The exact
 // message format is part of the public API contract and must remain stable.
-export async function connectWallet(): Promise<{ token: string; address: string; expiresAt: number }> {
-  const injected = injectedProvider();
-  if (!injected && !needsMetaMaskHandoff()) {
-    throw new Error("No browser wallet found — install MetaMask/KeepKey, or paste an sk-pioneer key");
+export async function connectWallet(options: {
+  choice?: WalletChoice;
+  signal?: AbortSignal;
+  onProgress?: (progress: WalletProgress) => void;
+  onAccount?: (account: { address: string; provider: string }) => void;
+} = {}): Promise<WalletSession> {
+  const { signal, onProgress } = options;
+  const cancelled = () => signal?.throwIfAborted();
+  cancelled();
+  onProgress?.("connecting");
+  const injected = injectedProvider(options.choice);
+  if (!injected && options.choice === "keepkey") {
+    throw new Error("KeepKey extension not found. Open the KeepKey extension, then retry.");
   }
+  if (!injected && !needsMetaMaskHandoff()) {
+    throw new Error("No browser wallet found. Open your wallet extension, or sign in with a Pioneer key.");
+  }
+  // Keep this provider for the entire challenge, even if another extension injects later.
   const eth = injected ?? (await metaMaskSession());
-  const accounts: string[] = await eth.request({ method: "eth_requestAccounts" });
-  const address = accounts[0];
-  if (!address) throw new Error("Wallet returned no account");
-  const ch = await fetch(`${API_BASE}/auth/challenge`).then((r) => r.json());
+  cancelled();
+  const providerName = eth === injectedProvider("keepkey") ? "KeepKey" : injected ? "Browser wallet" : "MetaMask";
+  const accounts: unknown = await eth.request({ method: "eth_requestAccounts" });
+  cancelled();
+  const address = Array.isArray(accounts) ? accounts[0] : null;
+  if (typeof address !== "string" || !/^0x[\da-f]{40}$/i.test(address)) throw new Error("Wallet returned no valid Ethereum account.");
+  options.onAccount?.({ address, provider: providerName });
+  const challengeResponse = await apiFetch(`${API_BASE}/auth/challenge`, { signal });
+  const ch = await challengeResponse.json();
+  if (!challengeResponse.ok) throw new Error(ch?.error || `Could not request a sign-in challenge (${challengeResponse.status}).`);
+  if (typeof ch?.challenge !== "string" || typeof ch?.nonce !== "string" || !Number.isFinite(ch?.expiresAt) || ch.expiresAt * 1000 <= Date.now()) {
+    throw new Error("Pioneer returned an invalid or expired sign-in challenge. Please retry.");
+  }
+  cancelled();
+  onProgress?.("signing");
   const message = `Pioneer API\nChallenge: ${ch.challenge}\nNonce: ${ch.nonce}\nAddress: ${address}`;
-  const signature: string = await eth.request({ method: "personal_sign", params: [message, address] });
-  const res = await fetch(`${API_BASE}/auth/verify`, {
+  const signature: unknown = await eth.request({ method: "personal_sign", params: [message, address] });
+  cancelled();
+  if (typeof signature !== "string" || !/^0x[\da-f]{130}$/i.test(signature)) throw new Error("Wallet returned an invalid signature. Please retry.");
+  onProgress?.("verifying");
+  const res = await apiFetch(`${API_BASE}/auth/verify`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ address, signature, challenge: ch.challenge, nonce: ch.nonce }),
+    signal,
   });
   const body = await res.json();
-  if (!res.ok) throw new Error(body?.error || `verify: ${res.status}`);
-  return { token: body.token, address, expiresAt: body.expiresAt };
+  cancelled();
+  if (!res.ok) throw new Error(body?.error || `Sign-in verification failed (${res.status}).`);
+  const session = walletSessionFromResponse(body);
+  if (session.address.toLowerCase() !== address.toLowerCase()) throw new Error("Pioneer returned a different wallet account. Please retry.");
+  return session;
 }
 
 export async function fetchModels(apiKey: string): Promise<ModelsResponse> {
-  const res = await fetch(`${API_BASE}/api/v1/jobs/models`, { headers: authHeaders(apiKey) });
+  const res = await apiFetch(`${API_BASE}/api/v1/jobs/models`, { headers: authHeaders(apiKey) });
   if (!res.ok) throw new ApiError(`models: ${res.status}`, res.status);
   return res.json();
 }
 
 export async function fetchAccount(apiKey: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_BASE}/api/v1/account`, { headers: authHeaders(apiKey) });
+  const res = await apiFetch(`${API_BASE}/api/v1/account`, { headers: authHeaders(apiKey) });
   if (!res.ok) throw new Error(`account: ${res.status}`);
   return res.json();
 }
@@ -279,7 +328,7 @@ export async function submitJob(
   endpoint: string,
   params: unknown,
 ): Promise<SubmitResponse> {
-  const res = await fetch(`${API_BASE}/api/v1/jobs`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/jobs`, {
     method: "POST",
     headers: { ...authHeaders(apiKey), "content-type": "application/json" },
     body: JSON.stringify({ model, endpoint, params }),
@@ -293,7 +342,7 @@ export async function submitJob(
 }
 
 export async function pollJob(apiKey: string, jobId: string): Promise<JobStatus> {
-  const res = await fetch(`${API_BASE}/api/v1/jobs/${jobId}`, { headers: authHeaders(apiKey) });
+  const res = await apiFetch(`${API_BASE}/api/v1/jobs/${jobId}`, { headers: authHeaders(apiKey) });
   const body = await res.json();
   if (!res.ok) throw new Error(body?.error || `status: ${res.status}`);
   return body;
@@ -302,7 +351,7 @@ export async function pollJob(apiKey: string, jobId: string): Promise<JobStatus>
 // format=url persists the result to R2 (content-addressed, billed storage)
 // and hands back the public URL — the same URL Media lists.
 export async function fetchResultUrl(apiKey: string, jobId: string): Promise<{ url: string; contentType: string }> {
-  const res = await fetch(`${API_BASE}/api/v1/jobs/${jobId}/result?format=url`, { headers: authHeaders(apiKey) });
+  const res = await apiFetch(`${API_BASE}/api/v1/jobs/${jobId}/result?format=url`, { headers: authHeaders(apiKey) });
   const ct = res.headers.get("content-type") || "";
   if (ct.includes("json")) {
     const body = await res.json();
@@ -339,7 +388,7 @@ export function blobToDataUrl(blob: Blob): Promise<string> {
 }
 
 export async function fetchMedia(apiKey: string): Promise<MediaList> {
-  const res = await fetch(`${API_BASE}/api/v1/media`, { headers: authHeaders(apiKey) });
+  const res = await apiFetch(`${API_BASE}/api/v1/media`, { headers: authHeaders(apiKey) });
   const body = await res.json();
   if (!res.ok) throw new Error(body?.error || `media: ${res.status}`);
   return body;
@@ -348,7 +397,7 @@ export async function fetchMedia(apiKey: string): Promise<MediaList> {
 export async function uploadMedia(apiKey: string, file: File): Promise<UploadResponse> {
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch(`${API_BASE}/api/v1/media`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/media`, {
     method: "POST",
     headers: authHeaders(apiKey),
     body: form,
@@ -400,6 +449,7 @@ let sbMem: Storyboard | null = null; // full doc incl. data: results too big for
 // project (personal or company-shared) instead of only localStorage. Null =
 // the legacy local-only personal doc. Set via openProject/newLocalProject.
 let activeProject: { id: string; apiKey: string } | null = null;
+let projectGeneration = 0;
 
 export function activeProjectId(): string | null {
   return activeProject?.id ?? null;
@@ -431,8 +481,9 @@ export function saveActiveProjectPipeline(projectId: string, pipeline: unknown):
   // whole document, so allowing a slow earlier request to finish last would
   // silently roll the cast registry back to a prefix of the user's edits.
   pipelineSync = pipelineSync.then(async () => {
+    if (activeProject?.id !== target.id || activeProject.apiKey !== target.apiKey) return;
     try {
-      const res = await fetch(`${API_BASE}/api/v1/projects/${target.id}`, {
+      const res = await apiFetch(`${API_BASE}/api/v1/projects/${target.id}`, {
         method: "PUT",
         headers: { ...authHeaders(target.apiKey), "content-type": "application/json" },
         body: JSON.stringify({ doc: snapshot, title: snapshot.title }),
@@ -450,7 +501,7 @@ export function saveActiveProjectPipeline(projectId: string, pipeline: unknown):
 export function saveActiveProjectStudioTimeline(projectId: string, timeline: unknown): boolean {
   if (!activeProject || !sbMem || (activeProject.id !== projectId && sbMem.id !== projectId)) return false;
   sbMem = { ...sbMem, studioTimeline: timeline, rev: sbMem.rev + 1, updatedAt: Date.now() };
-  fetch(`${API_BASE}/api/v1/projects/${activeProject.id}`, {
+  apiFetch(`${API_BASE}/api/v1/projects/${activeProject.id}`, {
     method: "PUT",
     headers: { ...authHeaders(activeProject.apiKey), "content-type": "application/json" },
     body: JSON.stringify({ doc: sbMem, title: sbMem.title }),
@@ -464,9 +515,11 @@ export function saveActiveProjectStudioTimeline(projectId: string, timeline: unk
 
 // Load a server project's doc into the working storyboard and make it active.
 export async function openProject(apiKey: string, id: string): Promise<Storyboard> {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${id}`, { headers: authHeaders(apiKey) });
+  const generation = projectGeneration;
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${id}`, { headers: authHeaders(apiKey) });
   const body = await res.json();
   if (!res.ok) throw new Error(body?.error || `open project: ${res.status}`);
+  if (generation !== projectGeneration) throw new Error("Sign-in changed while opening the project. Please open it again.");
   const doc: Storyboard = body.doc ?? {
     id, address: body.owner, title: body.title, rev: body.rev,
     shots: [], tracks: [], playhead: 0, createdAt: body.createdAt, updatedAt: body.updatedAt,
@@ -481,20 +534,23 @@ export async function openProject(apiKey: string, id: string): Promise<Storyboar
 // Re-open the project that was active before a reload. True when restored.
 export async function restoreActiveProject(apiKey: string): Promise<boolean> {
   const id = localStorage.getItem("ps_active_project");
+  const generation = projectGeneration;
   if (!id || activeProject) return false;
   try {
     await openProject(apiKey, id);
     return true;
   } catch {
-    localStorage.removeItem("ps_active_project"); // gone/denied — fall back to the local doc
+    // A stale rejection must not clear the selection made by the new account.
+    if (generation === projectGeneration && localStorage.getItem("ps_active_project") === id) localStorage.removeItem("ps_active_project");
     return false;
   }
 }
 
 // Drop back to the local-only personal doc (the pre-projects behavior).
-export function closeProject(): void {
+export function closeProject(preserveSelection = false): void {
+  projectGeneration++;
   activeProject = null;
-  localStorage.removeItem("ps_active_project");
+  if (!preserveSelection) localStorage.removeItem("ps_active_project");
   sbMem = null;
 }
 
@@ -539,7 +595,7 @@ function sbSave(sb: Storyboard): Storyboard {
   if (activeProject) {
     // Mirror to the server project. Fire-and-forget; the server owns revision
     // checks. A sync failure is surfaced so collaborators can reload safely.
-    fetch(`${API_BASE}/api/v1/projects/${activeProject.id}`, {
+    apiFetch(`${API_BASE}/api/v1/projects/${activeProject.id}`, {
       method: "PUT",
       headers: { ...authHeaders(activeProject.apiKey), "content-type": "application/json" },
       body: JSON.stringify({ doc: slim, title: sb.title }),
@@ -674,7 +730,7 @@ export async function chatCompletionMessage(
   const payload: Record<string, unknown> = { model: "auto", messages, temperature: 0.2 };
   if (options.tools?.length) payload.tools = options.tools;
   if (options.toolChoice) payload.tool_choice = options.toolChoice;
-  const res = await fetch(`${API_BASE}/api/v1/chat/completions`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/chat/completions`, {
     method: "POST",
     headers: { ...authHeaders(apiKey), "content-type": "application/json" },
     body: JSON.stringify(payload),
@@ -711,7 +767,7 @@ export async function captionImage(apiKey: string, imageUrl: string, instruction
   let lastError = "";
   for (const model of VISION_MODELS) {
     try {
-      const res = await fetch(`${API_BASE}/api/v1/chat/completions`, {
+      const res = await apiFetch(`${API_BASE}/api/v1/chat/completions`, {
         method: "POST",
         headers: { ...authHeaders(apiKey), "content-type": "application/json" },
         body: JSON.stringify({ model, messages: [{ role: "user", content }], temperature: 0.3 }),
@@ -745,14 +801,14 @@ export async function chatCompletion(apiKey: string, messages: ChatMessage[]): P
 export async function transcribe(apiKey: string, audio: Blob): Promise<string> {
   const form = new FormData();
   form.append("audio", audio, "take.webm");
-  const res = await fetch(`${API_BASE}/api/v1/stt`, { method: "POST", headers: authHeaders(apiKey), body: form });
+  const res = await apiFetch(`${API_BASE}/api/v1/stt`, { method: "POST", headers: authHeaders(apiKey), body: form });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body?.error || `stt: ${res.status}`);
   return (body?.text || "").trim();
 }
 
 export async function askLore(apiKey: string, question: string, context?: string): Promise<string> {
-  const res = await fetch(`${API_BASE}/api/v1/lore`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/lore`, {
     method: "POST",
     headers: { ...authHeaders(apiKey), "content-type": "application/json" },
     body: JSON.stringify({ question, context }),
@@ -800,7 +856,7 @@ export type MotionModel = { nickname: string; name: string; loaded: boolean; fps
 
 /** Which ARDY checkpoints the service has. Used to detect motion being live. */
 export async function fetchMotionModels(apiKey: string): Promise<MotionModel[]> {
-  const res = await fetch(`${API_BASE}/api/v1/motion/models`, { headers: authHeaders(apiKey) });
+  const res = await apiFetch(`${API_BASE}/api/v1/motion/models`, { headers: authHeaders(apiKey) });
   if (!res.ok) throw new Error(`motion/models: ${res.status}`);
   return (await res.json())?.models ?? [];
 }
@@ -809,7 +865,7 @@ export async function generateMotion(
   apiKey: string,
   params: { prompt: string; duration_s: number; model?: string; seed?: number; constraints?: MotionConstraint[] },
 ): Promise<Motion> {
-  const res = await fetch(`${API_BASE}/api/v1/motion/generate`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/motion/generate`, {
     method: "POST",
     headers: { ...authHeaders(apiKey), "content-type": "application/json" },
     body: JSON.stringify({ model: "core", format: "json", ...params }),
@@ -857,7 +913,7 @@ export function pickFlowModels(models: JobModel[]): Omit<FlowModels, "vrm"> {
 /** Is VRM generation currently available through the Pioneer API? */
 export async function fetchVrmStatus(apiKey: string): Promise<boolean> {
   try {
-    const res = await fetch(`${API_BASE}/api/v1/vrm/health`, { headers: authHeaders(apiKey) });
+    const res = await apiFetch(`${API_BASE}/api/v1/vrm/health`, { headers: authHeaders(apiKey) });
     if (!res.ok) return false;
     const b = await res.json();
     return !!b?.ok;
@@ -871,7 +927,7 @@ export type VrmJob = { job_id: string };
 /** Kick off a Meshy→VRM generation from a portrait image URL. Long-running
  *  (Meshy image-to-3d + rig ≈ minutes) → returns a job id to poll. */
 export async function generateVrm(apiKey: string, params: { image?: string; prompt?: string; name?: string }): Promise<VrmJob> {
-  const res = await fetch(`${API_BASE}/api/v1/vrm/generate`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/vrm/generate`, {
     method: "POST",
     headers: { ...authHeaders(apiKey), "content-type": "application/json" },
     body: JSON.stringify(params),
@@ -884,7 +940,7 @@ export async function generateVrm(apiKey: string, params: { image?: string; prom
 export type VrmStatus = { status: "pending" | "running" | "done" | "error"; stage?: string; url?: string; error?: string; credits?: number };
 
 export async function pollVrm(apiKey: string, jobId: string): Promise<VrmStatus> {
-  const res = await fetch(`${API_BASE}/api/v1/vrm/${jobId}`, { headers: authHeaders(apiKey) });
+  const res = await apiFetch(`${API_BASE}/api/v1/vrm/${jobId}`, { headers: authHeaders(apiKey) });
   const body = await res.json();
   if (!res.ok) throw new Error(body?.error || `vrm status: ${res.status}`);
   return body;

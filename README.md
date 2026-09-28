@@ -30,8 +30,11 @@ bun run dev
 ```
 
 Open `http://localhost:5173`, then connect a browser wallet or paste your own
-Pioneer API key. Credentials are entered at runtime, held only in page memory,
-and discarded on reload or sign-out; they are never bundled or persisted.
+Pioneer API key. Remember me is on by default for wallet sign-in, keeping the
+wallet session on this device until its server expiry. Uncheck it to keep the
+session in the current tab only. Sign-out clears cached wallet sessions. Pasted
+API keys stay in page memory and are discarded on reload; no credentials are
+bundled with the application.
 
 `bun run setup` verifies the bundled GNM head and copies the Draco/KTX2 runtime
 decoders from the locked `three` dependency. The normal dev, test, and build

@@ -1,6 +1,7 @@
 export type StudioClipKind = "image" | "video" | "audio";
 export type StudioClipOrigin = "storyboard" | "library" | "soundtrack" | "upload";
 export type StudioTrackKind = "video" | "audio";
+export type StudioOutput = "portrait" | "square" | "landscape";
 
 export type StudioTrack = {
   id: string;
@@ -34,6 +35,7 @@ export type StudioClip = {
 
 export type StudioTimeline = {
   version: 2;
+  output: StudioOutput;
   masterVolume: number;
   tracks: StudioTrack[];
   clips: StudioClip[];
@@ -67,7 +69,7 @@ export function trackKindForClip(kind: StudioClipKind): StudioTrackKind {
 }
 
 export function emptyStudioTimeline(): StudioTimeline {
-  return { version: 2, masterVolume: 1, tracks: defaultTracks(), clips: [], suppressedSourceIds: [] };
+  return { version: 2, output: "landscape", masterVolume: 1, tracks: defaultTracks(), clips: [], suppressedSourceIds: [] };
 }
 
 export function normalizeStudioTimeline(value: unknown): StudioTimeline {
@@ -119,6 +121,7 @@ export function normalizeStudioTimeline(value: unknown): StudioTimeline {
     : [];
   return {
     version: 2,
+    output: raw.output === "portrait" || raw.output === "square" ? raw.output : "landscape",
     masterVolume: clamp01(finite(raw.masterVolume, 1)),
     tracks,
     clips,
@@ -605,7 +608,7 @@ export function nudgeClip(timeline: StudioTimeline, id: string, delta: number): 
 
 export type StudioExportPlan = {
   version: 2;
-  output?: "portrait" | "square" | "landscape";
+  output?: StudioOutput;
   clips: Array<{
     url: string;
     kind: StudioClipKind;
@@ -627,7 +630,7 @@ export type StudioExportCheck =
 /** Compile the canonical cut to assemble v2. Track order is converted to
  * bottom-to-top visual input order so sequential server overlays preserve the
  * monitor's z-order. Track/master gain and mute are flattened into each clip. */
-export function buildStudioExportPlan(timeline: StudioTimeline, output?: StudioExportPlan["output"]): StudioExportCheck {
+export function buildStudioExportPlan(timeline: StudioTimeline): StudioExportCheck {
   const doc = normalizeStudioTimeline(timeline);
   const issues: string[] = [];
   const trackById = new Map(doc.tracks.map((track) => [track.id, track]));
@@ -651,7 +654,7 @@ export function buildStudioExportPlan(timeline: StudioTimeline, output?: StudioE
     ok: true,
     plan: {
       version: 2,
-      ...(output ? { output } : {}),
+      output: doc.output,
       duration,
       clips: ordered.map((clip) => ({
         url: clip.url!,
