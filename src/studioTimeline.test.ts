@@ -33,6 +33,7 @@ const {
   sharedInsertionStart,
   splitClip,
   studioTimelineEnd,
+  studioTimelineForPersistence,
   trimClip,
 } = await import("./studioTimeline");
 
@@ -85,6 +86,31 @@ test("studio timeline respects suppressed linked clips", () => {
   const doc = emptyStudioTimeline();
   doc.suppressedSourceIds.push("beat:a");
   expect(reconcileStudioTimeline(doc, [beat("a", 0)]).clips).toHaveLength(0);
+});
+
+test("output format follows each saved project through persistence and export", () => {
+  const portrait = { ...addClip(emptyStudioTimeline(), video("campaign", 0)), output: "portrait" as const };
+  const square = { ...emptyStudioTimeline(), output: "square" as const };
+  saveStudioTimeline("portrait-campaign", portrait);
+  saveStudioTimeline("square-campaign", square);
+  expect(loadStudioTimeline("square-campaign").output).toBe("square");
+  expect(loadStudioTimeline("portrait-campaign").output).toBe("portrait");
+
+  // Read the serialized document under a new key to bypass the in-memory cache.
+  const stored = localStorage.getItem("ps_studio_timeline_portrait-campaign")!;
+  localStorage.setItem("ps_studio_timeline_reopened-campaign", stored);
+  const reopened = loadStudioTimeline("reopened-campaign");
+  const serverDoc = studioTimelineForPersistence(reopened);
+  expect(serverDoc.output).toBe("portrait");
+  const plan = buildStudioExportPlan(reconcileStudioTimeline(normalizeStudioTimeline(serverDoc), []));
+  expect(plan.ok && plan.plan.output).toBe("portrait");
+});
+
+test("legacy and invalid output formats default to landscape", () => {
+  expect(emptyStudioTimeline().output).toBe("landscape");
+  for (const output of [undefined, null, "", "unknown", "__proto__", 9]) {
+    expect(normalizeStudioTimeline({ version: 2, output }).output).toBe("landscape");
+  }
 });
 
 test("studio timeline picks the topmost active visual and computes the edit end", () => {
@@ -340,7 +366,7 @@ test("export plan carries every visual and audio edit into the v2 contract", () 
   });
   const result = buildStudioExportPlan(doc);
   expect(result.ok).toBe(true);
-  const portrait = buildStudioExportPlan(doc, "portrait");
+  const portrait = buildStudioExportPlan({ ...doc, output: "portrait" });
   expect(portrait.ok && portrait.plan.output).toBe("portrait");
   if (result.ok) {
     expect(result.plan.version).toBe(2);
