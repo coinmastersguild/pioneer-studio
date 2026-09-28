@@ -58,6 +58,7 @@ import StageView from "./StageView";
 import CreateView from "./CreateView";
 import MediaView from "./MediaView";
 import HeadView from "./HeadView";
+import PreviewBoundary from "./PreviewBoundary";
 import ModelIndexView from "./ModelIndexView";
 import ProjectsView from "./ProjectsView";
 import CompaniesView from "./CompaniesView";
@@ -716,10 +717,14 @@ function App() {
           <CreateView ps={ps} />
         </div>
         <div className={`view${mode === "animate" ? " active" : ""}`} id="view-animate">
-          <StageView ps={ps} active={mode === "animate"} />
+          <PreviewBoundary label="Animation preview">
+            <StageView ps={ps} active={mode === "animate"} />
+          </PreviewBoundary>
         </div>
         <div className={`view${mode === "head" ? " active" : ""}`} id="view-head">
-          <HeadView ps={ps} active={mode === "head"} />
+          <PreviewBoundary label="Talking head preview">
+            <HeadView ps={ps} active={mode === "head"} />
+          </PreviewBoundary>
         </div>
         <div className={`view${mode === "studio" ? " active" : ""}`} id="view-studio">
           <StudioView ps={ps} />

@@ -226,3 +226,7 @@ svg.ic{ width:15px; height:15px; stroke:currentColor; stroke-width:1.5; fill:non
   background:var(--panel); color:var(--fg1); border:1px solid var(--border); border-radius:var(--radius-md);
 }
 .gate-key:focus{ outline:none; border-color:var(--compass-400); }
+
+.preview-unavailable{ margin:auto; padding:32px; max-width:480px; color:var(--fg2); text-align:center; }
+.preview-unavailable strong{ color:var(--fg1); }
+.preview-unavailable p{ line-height:1.5; }

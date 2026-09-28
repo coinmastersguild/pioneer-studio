@@ -1009,12 +1009,13 @@ export default function StudioView({ ps }: { ps: PS }) {
   }
 
   async function onUploadAsset(event: React.ChangeEvent<HTMLInputElement>) {
-    const files = event.target.files;
+    // Clearing the picker also clears its live FileList. Keep the selected files first.
+    const files = Array.from(event.target.files || []);
     event.target.value = "";
-    if (!files?.length) return;
+    if (!files.length) return;
     const p = psRef.current;
     if (!p.apiKey) return p.toast("Paste your sk-pioneer key first (Settings)");
-    for (const file of Array.from(files)) {
+    for (const file of files) {
       try {
         const uploaded = await uploadMedia(p.apiKey, file);
         p.charge(uploaded.credits_remaining);
