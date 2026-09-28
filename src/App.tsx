@@ -15,6 +15,7 @@ import {
   fetchStoryboard,
   JobTerminalError,
   openProject,
+  projectOpeningMode,
   primeMetaMaskSession,
   pollJob,
   restoreActiveProject,
@@ -150,8 +151,8 @@ function App() {
   const agentHistoryRef = useRef<ChatMessage[]>([]);
   const catalogRefreshAt = useRef(0);
   apiKeyRef.current = apiKey;
-  // Deep link: /?project=<id> opens that specific project and lands on the
-  // storyboard. Wins over the localStorage restore below; kept in a ref so it
+  // Deep link: /?project=<id> opens that specific project in its authored
+  // editor. Wins over the localStorage restore below; kept in a ref so it
   // only fires until it succeeds (Settings writes apiKey on every keystroke).
   const deepLinkedProject = useRef(new URLSearchParams(location.search).get("project"));
 
@@ -215,19 +216,25 @@ function App() {
       const pid = deepLinkedProject.current;
       if (pid) {
         openProject(apiKey, pid)
-          .then(() => {
+          .then((doc) => {
             if (apiKeyRef.current !== apiKey) return;
             deepLinkedProject.current = null;
-            refreshBoard();
-            setMode("board");
+            setBoard(doc);
+            setMode(projectOpeningMode(doc));
           })
           .catch(() => {
             if (apiKeyRef.current !== apiKey) return;
-            return restoreActiveProject(apiKey).then((restored) => { if (restored && apiKeyRef.current === apiKey) refreshBoard(); });
+            return restoreActiveProject(apiKey).then((doc) => {
+              if (!doc || apiKeyRef.current !== apiKey) return;
+              setBoard(doc);
+              setMode(projectOpeningMode(doc));
+            });
           });
       } else {
-        restoreActiveProject(apiKey).then((restored) => {
-          if (restored && apiKeyRef.current === apiKey) refreshBoard();
+        restoreActiveProject(apiKey).then((doc) => {
+          if (!doc || apiKeyRef.current !== apiKey) return;
+          setBoard(doc);
+          setMode(projectOpeningMode(doc));
         });
       }
     }, 500);
@@ -526,7 +533,7 @@ function App() {
       },
       {
         name: "app.open_project",
-        description: "Open an authorized saved project by exact id and switch to its storyboard",
+        description: "Open an authorized saved project by exact id and switch to its authored editor",
         parameters: {
           type: "object",
           properties: { id: { type: "string", description: "Exact project id from the projects API" } },
@@ -540,7 +547,7 @@ function App() {
           const doc = await openProject(apiKey, id);
           if (apiKeyRef.current !== apiKey) throw new Error("Account changed while opening this project.");
           setBoard(doc);
-          setMode("board");
+          setMode(projectOpeningMode(doc));
           return { id: doc.id, title: doc.title, rev: doc.rev, beats: doc.shots.length };
         },
       },
