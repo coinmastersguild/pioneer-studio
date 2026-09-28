@@ -105,7 +105,7 @@ export type Pipeline = {
   music: Artifact | null;
   mix: Artifact | null;
   mixStale?: boolean; // a beat was edited/deleted after the mix rendered
-  release?: { url: string; duration: number; createdAt: string } | null; // last server master
+  release?: { url: string; duration: number; createdAt: string; output?: StudioExportPlan["output"]; sha256?: string } | null; // last server master
 };
 
 // Upstream edits flag downstream artifacts as stale (kept, not
@@ -925,7 +925,7 @@ function encodeWav(buf: AudioBuffer): Blob {
 export async function assembleRelease(
   apiKey: string,
   timeline: StudioExportPlan,
-): Promise<{ url?: string; job_id?: string; credits_remaining?: number | null } | null> {
+): Promise<{ url?: string; job_id?: string; output?: string; sha256?: string; credits_remaining?: number | null } | null> {
   const res = await fetch(`${API_BASE}/api/v1/storyboard/assemble`, {
     method: "POST",
     headers: { ...authHeaders(apiKey), "content-type": "application/json" },
@@ -934,5 +934,7 @@ export async function assembleRelease(
   if (res.status === 404 || res.status === 405 || res.status === 501) return null; // not live yet
   const body = await res.json().catch(() => null);
   if (!res.ok) throw new Error(body?.error || `assemble: ${res.status}`);
+  if (timeline.output && body?.output !== timeline.output)
+    throw new Error(`Export service did not confirm ${timeline.output} output. Review the result before using it.`);
   return body;
 }

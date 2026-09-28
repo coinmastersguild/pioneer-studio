@@ -340,6 +340,8 @@ test("export plan carries every visual and audio edit into the v2 contract", () 
   });
   const result = buildStudioExportPlan(doc);
   expect(result.ok).toBe(true);
+  const portrait = buildStudioExportPlan(doc, "portrait");
+  expect(portrait.ok && portrait.plan.output).toBe("portrait");
   if (result.ok) {
     expect(result.plan.version).toBe(2);
     expect(result.plan.clips.map((clip) => clip.url)).toEqual([

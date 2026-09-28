@@ -66,7 +66,7 @@ export default function SettingsView({ ps, auth }: { ps: PS; auth: SettingsAuth 
       <div style={{ marginBottom: 22 }}>
         <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Sign in</h3>
         <div className="sub" style={{ marginBottom: 10 }}>
-          Paste an <code>sk-pioneer-…</code> key, or connect a wallet above. Both stay only in page memory and are discarded on reload or sign-out. Required before any job runs.
+          Paste an <code>sk-pioneer-…</code> key, or connect a wallet above. Wallet sign-in survives reloads in this tab for up to 12 hours; sign-out clears it. Pasted keys stay only in page memory.
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", maxWidth: 560 }}>
           <input
