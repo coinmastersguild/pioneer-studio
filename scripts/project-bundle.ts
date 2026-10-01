@@ -45,8 +45,14 @@ async function open(path: string) {
 
 async function importFrom(path: string, title?: string): Promise<string> {
   const bundle = await open(path);
+  // Files this account already stores are not uploaded again (servers without the check: upload everything).
+  const res = await fetch(`${API}/api/v1/media/have`, { method: "POST", headers: { ...auth, "content-type": "application/json" }, body: JSON.stringify({ sha256: bundle.manifest.assets.map((a) => a.sha256) }) });
+  const have: Record<string, string> = res.status === 404 ? {} : ((await res.json()).have ?? {});
+  console.error(`${Object.keys(have).length} of ${bundle.manifest.assets.length} files already stored`);
   const restored = await importBundle(bundle, {
     upload: async (bytes, name) => {
+      const known = have[name.split(".")[0]];
+      if (known) return { url: known, sha256: name.split(".")[0] };
       const form = new FormData();
       form.append("file", new File([bytes as BlobPart], name));
       const body = await api("/api/v1/media", { method: "POST", body: form });
