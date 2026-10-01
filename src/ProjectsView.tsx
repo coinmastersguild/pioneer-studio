@@ -13,6 +13,8 @@ import {
   type ProjectSummary,
 } from "./api";
 import { relTime, type PS } from "./shared";
+import { exportProjectToFile, importProjectFile, listCheckpoints, restoreCheckpoint, takeCheckpoint, type Checkpoint } from "./projectTransfer";
+import { registerActions } from "./control";
 
 // Lists the user's companies and every project they can see — personal ones
 // plus every company's shared projects (the server returns those for any
@@ -26,6 +28,10 @@ export default function ProjectsView({ ps }: { ps: PS }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const active = activeProjectId();
+  const [work, setWork] = useState(""); // export/import progress line
+  const [cpFor, setCpFor] = useState<string | null>(null);
+  const [cps, setCps] = useState<Checkpoint[]>([]);
+  const progress = (verb: string) => (done: number, total: number) => setWork(`${verb} ${done}/${total} files…`);
 
   async function refresh() {
     if (!ps.apiKey) return;
@@ -93,9 +99,102 @@ export default function ProjectsView({ ps }: { ps: PS }) {
     }
   }
 
+  async function exportOne(id: string) {
+    try {
+      const m = await exportProjectToFile(ps.apiKey, id, progress("Exporting"));
+      ps.toast(`Exported ${m.assets.length} files, every one verified`, "gold");
+    } catch (e: any) {
+      if (e?.name !== "AbortError") ps.toast(String(e.message || e));
+    } finally {
+      setWork("");
+    }
+  }
+
+  async function importFile(file: File | undefined) {
+    if (!file) return;
+    try {
+      const ask = (n: number, bytes: number, name: string) =>
+        confirm(`Import "${name}" as a new project? ${n ? `${n} file(s), ${(bytes / 1e6).toFixed(1)} MB, will be uploaded (each upload uses intake credits).` : "Every file is already in your media, nothing to upload."}`);
+      const p = await importProjectFile(ps.apiKey, file, ask, progress("Importing"));
+      if (!p) return;
+      ps.toast(`Imported "${p.title}"`, "gold");
+      await refresh();
+    } catch (e: any) {
+      ps.toast(String(e.message || e));
+    } finally {
+      setWork("");
+    }
+  }
+
+  async function showCheckpoints(id: string) {
+    if (cpFor === id) return setCpFor(null);
+    setCpFor(id);
+    setCps([]);
+    try {
+      setCps(await listCheckpoints(ps.apiKey, id));
+    } catch (e: any) {
+      ps.toast(String(e.message || e));
+    }
+  }
+
+  async function checkpointNow(id: string) {
+    try {
+      await takeCheckpoint(ps.apiKey, id, "manual");
+      setCps(await listCheckpoints(ps.apiKey, id));
+    } catch (e: any) {
+      ps.toast(String(e.message || e));
+    }
+  }
+
+  async function restore(id: string, cp: Checkpoint) {
+    if (!confirm(`Restore "${cp.title}" to rev ${cp.rev} (${new Date(cp.at).toLocaleString()})? The current state is checkpointed first.`)) return;
+    try {
+      await restoreCheckpoint(ps.apiKey, id, cp.id);
+      setCps(await listCheckpoints(ps.apiKey, id));
+      if (activeProjectId() === id) await open(id);
+      ps.toast(`Restored rev ${cp.rev}`, "gold");
+    } catch (e: any) {
+      ps.toast(String(e.message || e));
+    }
+  }
+
+  // Agents get the same rollback path the buttons use.
+  useEffect(() => {
+    if (!ps.apiKey) return;
+    registerActions([
+      { name: "projects.checkpoints", description: "List a project's checkpoints (newest first).", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+        run: (p) => listCheckpoints(ps.apiKey, String(p?.id)) },
+      { name: "projects.checkpoint", description: "Save a checkpoint of a project now.", parameters: { type: "object", properties: { id: { type: "string" }, label: { type: "string" } }, required: ["id"] },
+        run: (p) => takeCheckpoint(ps.apiKey, String(p?.id), String(p?.label ?? "agent")) },
+      { name: "projects.restore", description: "Restore a project to a checkpoint (the current state is checkpointed first).", confirmation: "Restore this project to an earlier checkpoint?",
+        parameters: { type: "object", properties: { id: { type: "string" }, checkpoint: { type: "string" } }, required: ["id", "checkpoint"] },
+        run: (p) => restoreCheckpoint(ps.apiKey, String(p?.id), String(p?.checkpoint)) },
+    ]);
+  }, [ps.apiKey]);
+
   const nameFor = (addr: string) => companies.find((c) => c.companyAddress === addr)?.name || `${addr.slice(0, 6)}…${addr.slice(-4)}`;
   const personal = projects.filter((p) => p.ownerType === "personal");
   const byCompany = (addr: string) => projects.filter((p) => p.ownerType === "company" && p.owner === addr);
+
+  // Per-project tools: export, and the checkpoint list (restore / checkpoint now).
+  const row = (p: ProjectSummary) => (
+    <>
+      <button type="button" className="pill" onClick={() => exportOne(p.id)} title="Export as a .pstudio bundle">Export</button>
+      <button type="button" className={`pill ${cpFor === p.id ? "on" : ""}`} onClick={() => showCheckpoints(p.id)} title="Checkpoints">⟲</button>
+      {cpFor === p.id && (
+        <div style={{ flexBasis: "100%", fontSize: 12, marginTop: 6 }}>
+          <button type="button" className="pill" onClick={() => checkpointNow(p.id)}>Checkpoint now</button>
+          {cps.length === 0 && <span style={{ opacity: 0.5, marginLeft: 8 }}>No checkpoints yet.</span>}
+          {cps.map((c) => (
+            <div key={c.id} style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4 }}>
+              <span style={{ flex: 1, opacity: 0.85 }}>rev {c.rev} · {relTime(c.at)}{c.label ? ` · ${c.label}` : ""}</span>
+              <button type="button" className="pill" onClick={() => restore(p.id, c)}>Restore</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
 
   if (!ps.apiKey) {
     return (
@@ -111,6 +210,10 @@ export default function ProjectsView({ ps }: { ps: PS }) {
       <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
         <h2 style={{ margin: 0 }}>Projects</h2>
         <button type="button" className="pill" onClick={refresh}>Refresh</button>
+        <label className="pill" style={{ cursor: "pointer" }} title="Import a .pstudio project bundle as a new project">
+          Import…
+          <input type="file" accept=".pstudio,application/zip" hidden onChange={(e) => importFile(e.target.files?.[0])} />
+        </label>
         {active && (
           <button type="button" className="pill" onClick={close}>
             Close project — back to local board
@@ -118,6 +221,7 @@ export default function ProjectsView({ ps }: { ps: PS }) {
         )}
       </div>
       {err && <p style={{ color: "#f88" }}>{err}</p>}
+      {work && <p style={{ fontSize: 13, opacity: 0.8 }}>{work}</p>}
 
       {/* Company status — always shown so it's clear whether you're in a company */}
       <div style={{ ...rowStyle, margin: "12px 0 4px", display: "block" }}>
@@ -162,7 +266,7 @@ export default function ProjectsView({ ps }: { ps: PS }) {
         </button>
       </div>
 
-      <Section title="Personal" projects={personal} active={active} onOpen={open} onDelete={remove} />
+      <Section title="Personal" projects={personal} active={active} onOpen={open} onDelete={remove} row={row} />
       {companies.map((c) => (
         <Section
           key={c.companyAddress}
@@ -172,6 +276,7 @@ export default function ProjectsView({ ps }: { ps: PS }) {
           active={active}
           onOpen={open}
           onDelete={remove}
+          row={row}
         />
       ))}
     </div>
@@ -179,10 +284,10 @@ export default function ProjectsView({ ps }: { ps: PS }) {
 }
 
 function Section({
-  title, subtitle, projects, active, onOpen, onDelete,
+  title, subtitle, projects, active, onOpen, onDelete, row,
 }: {
   title: string; subtitle?: string; projects: ProjectSummary[]; active: string | null;
-  onOpen: (id: string) => void; onDelete: (id: string, name: string) => void;
+  onOpen: (id: string) => void; onDelete: (id: string, name: string) => void; row: (p: ProjectSummary) => React.ReactNode;
 }) {
   return (
     <div style={{ marginBottom: 24 }}>
@@ -195,13 +300,14 @@ function Section({
       ) : (
         <div style={{ display: "grid", gap: 6 }}>
           {projects.map((p) => (
-            <div key={p.id} style={{ ...rowStyle, outline: p.id === active ? "1px solid #22c55e" : "none" }}>
+            <div key={p.id} style={{ ...rowStyle, flexWrap: "wrap", outline: p.id === active ? "1px solid #22c55e" : "none" }}>
               <button type="button" onClick={() => onOpen(p.id)} style={openBtn}>
                 <b>{p.title}</b>
                 <span style={{ opacity: 0.5, fontSize: 12, marginLeft: 8 }}>
                   {relTime(p.updatedAt)}{p.id === active ? " · open" : ""}
                 </span>
               </button>
+              {row(p)}
               <button type="button" className="pill" onClick={() => onDelete(p.id, p.title)} title="Delete">✕</button>
             </div>
           ))}
