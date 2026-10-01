@@ -29,6 +29,7 @@ const {
   repairTrackOverlaps,
   rippleMoveClip,
   rippleRemoveClip,
+  rippleTrimClip,
   saveStudioTimeline,
   sharedInsertionStart,
   splitClip,
@@ -401,4 +402,52 @@ test("export plan preserves gaps, overlaps, stills, trims, and master gain", () 
     expect(result.plan.clips[0]).toMatchObject({ kind: "video", start: 1, duration: 8, trimIn: 2, volume: 0.5 });
     expect(result.plan.clips[1]).toMatchObject({ kind: "image", start: 4, duration: 10, muted: true });
   }
+});
+
+test("ripple trim shortens a beat and pulls every later clip on every track left by the same amount", () => {
+  const doc = normalizeStudioTimeline({
+    version: 2, output: "landscape", masterVolume: 1, suppressedSourceIds: [],
+    tracks: [
+      { id: "video-1", kind: "video", name: "Picture", muted: false, locked: false, volume: 1 },
+      { id: "audio-1", kind: "audio", name: "Voice", muted: false, locked: false, volume: 1 },
+      { id: "audio-2", kind: "audio", name: "Music", muted: false, locked: false, volume: 1 },
+    ],
+    clips: [
+      { id: "a", origin: "upload", sourceId: "a", name: "a", kind: "video", contentType: "video/mp4", trackId: "video-1", start: 0, duration: 12, trimIn: 0, sourceDuration: 12, volume: 1, muted: false, fadeIn: 0, fadeOut: 0 },
+      { id: "b", origin: "upload", sourceId: "b", name: "b", kind: "video", contentType: "video/mp4", trackId: "video-1", start: 12, duration: 8, trimIn: 0, volume: 1, muted: false, fadeIn: 0, fadeOut: 0 },
+      { id: "va", origin: "upload", sourceId: "va", name: "line a", kind: "audio", contentType: "audio/mpeg", trackId: "audio-1", start: 0.3, duration: 5.8, trimIn: 0, volume: 1, muted: false, fadeIn: 0, fadeOut: 0 },
+      { id: "fx", origin: "upload", sourceId: "fx", name: "fx a", kind: "audio", contentType: "audio/mpeg", trackId: "audio-1", start: 6.5, duration: 5.5, trimIn: 0, volume: 1, muted: false, fadeIn: 0, fadeOut: 0 },
+      { id: "vb", origin: "upload", sourceId: "vb", name: "line b", kind: "audio", contentType: "audio/mpeg", trackId: "audio-1", start: 12.3, duration: 3, trimIn: 0, volume: 1, muted: false, fadeIn: 0, fadeOut: 0 },
+      { id: "bed", origin: "upload", sourceId: "bed", name: "music", kind: "audio", contentType: "audio/mpeg", trackId: "audio-2", start: 0, duration: 20, trimIn: 0, volume: 1, muted: false, fadeIn: 0, fadeOut: 0 },
+    ],
+  });
+  const out = rippleTrimClip(doc, "a", 6.8);
+  const at = (id: string) => out.clips.find((c) => c.id === id)!;
+  expect(at("a").duration).toBeCloseTo(6.8);
+  expect(at("b").start).toBeCloseTo(6.8); // next beat follows straight on
+  expect(at("vb").start).toBeCloseTo(7.1); // its voice moves with it
+  expect(at("va").start).toBeCloseTo(0.3); // the trimmed beat's own line is untouched
+  expect(at("fx").duration).toBeCloseTo(0.3); // an effect inside the beat is cut to its new end
+  expect(at("bed").duration).toBeCloseTo(14.8); // the music bed shrinks by the same 5.2 s
+  // and it is reversible: trimming back restores the original layout
+  const back = rippleTrimClip(out, "a", 12);
+  expect(back.clips.find((c) => c.id === "b")!.start).toBeCloseTo(12);
+  expect(back.clips.find((c) => c.id === "bed")!.duration).toBeCloseTo(20);
+});
+
+test("ripple trim never lengthens past the source or touches locked tracks", () => {
+  const doc = normalizeStudioTimeline({
+    version: 2, output: "landscape", masterVolume: 1, suppressedSourceIds: [],
+    tracks: [
+      { id: "video-1", kind: "video", name: "Picture", muted: false, locked: false, volume: 1 },
+      { id: "audio-1", kind: "audio", name: "Ref", muted: false, locked: true, volume: 1 },
+    ],
+    clips: [
+      { id: "a", origin: "upload", sourceId: "a", name: "a", kind: "video", contentType: "video/mp4", trackId: "video-1", start: 0, duration: 4, trimIn: 0, sourceDuration: 5, volume: 1, muted: false, fadeIn: 0, fadeOut: 0 },
+      { id: "r", origin: "upload", sourceId: "r", name: "ref", kind: "audio", contentType: "audio/mpeg", trackId: "audio-1", start: 4, duration: 3, trimIn: 0, volume: 1, muted: false, fadeIn: 0, fadeOut: 0 },
+    ],
+  });
+  const out = rippleTrimClip(doc, "a", 9);
+  expect(out.clips.find((c) => c.id === "a")!.duration).toBeCloseTo(5);
+  expect(out.clips.find((c) => c.id === "r")!.start).toBeCloseTo(4);
 });

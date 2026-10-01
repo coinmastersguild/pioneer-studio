@@ -27,6 +27,7 @@ import {
   removeTrack,
   reorderTrack,
   rippleRemoveClip,
+  rippleTrimClip,
   rippleMoveClip,
   saveStudioTimeline,
   sharedInsertionStart,
@@ -786,6 +787,31 @@ export default function StudioView({ ps }: { ps: PS }) {
     psRef.current.toast(`${clip.name} removed and the track gap closed`, "ok");
   }
 
+  function selectClipById(id: string) {
+    const clip = clipsRef.current.find((item) => item.id === id);
+    if (!clip) throw new Error(`no clip ${id}; studio.get_state lists clip ids`);
+    selectTimelineClip(clip);
+    return { id: clip.id, name: clip.name, start: clip.start, duration: clip.duration, trimIn: clip.trimIn };
+  }
+
+  // Exact trim for agents (the drag handles are coarse). Ripple keeps every track in sync; one undo step.
+  function trimClipById(id: string, duration: number, trimIn: number | undefined, ripple: boolean) {
+    const clip = clipsRef.current.find((item) => item.id === id);
+    if (!clip) throw new Error(`no clip ${id}; studio.get_state lists clip ids`);
+    if (clipIsLocked(clip)) throw new Error("Unlock the track before trimming this clip");
+    updateTimeline((doc) => (ripple ? rippleTrimClip(doc, id, duration, trimIn) : patchClip(doc, id, { duration, ...(trimIn == null ? {} : { trimIn }) })));
+    return { id, from: { start: clip.start, duration: clip.duration, trimIn: clip.trimIn }, requested: { duration, trimIn: trimIn ?? clip.trimIn }, ripple };
+  }
+
+  function setClipMedia(id: string, url: string, contentType: string, sourceDuration?: number, duration?: number) {
+    const clip = clipsRef.current.find((item) => item.id === id);
+    if (!clip) throw new Error(`no clip ${id}; studio.get_state lists clip ids`);
+    if (clip.origin === "storyboard" || clip.origin === "soundtrack") throw new Error("storyboard clips follow their beat; use board.set_beat_media");
+    if (!/^https:\/\//.test(url)) throw new Error("url must be an https URL of a hosted file");
+    updateClip(id, { url, contentType, ...(sourceDuration == null ? {} : { sourceDuration }), ...(duration == null ? {} : { duration }) });
+    return { id, from: clip.url, to: url };
+  }
+
   function nudgeSelectedClip(delta: number) {
     const id = selectedClipRef.current;
     const clip = clipsRef.current.find((item) => item.id === id);
@@ -1027,8 +1053,8 @@ export default function StudioView({ ps }: { ps: PS }) {
     p.refreshMedia();
   }
 
-  const fnsRef = useRef({ regenSel, renderDrafts, exportTimeline, seekTo, toggleFullscreen, togglePlayback, removeSelectedClip, splitSelectedClip, duplicateSelectedClip, rippleDeleteSelectedClip, nudgeSelectedClip, undoTimeline, redoTimeline, createTrack, moveSelectedToTrack });
-  fnsRef.current = { regenSel, renderDrafts, exportTimeline, seekTo, toggleFullscreen, togglePlayback, removeSelectedClip, splitSelectedClip, duplicateSelectedClip, rippleDeleteSelectedClip, nudgeSelectedClip, undoTimeline, redoTimeline, createTrack, moveSelectedToTrack };
+  const fnsRef = useRef({ regenSel, renderDrafts, exportTimeline, seekTo, toggleFullscreen, togglePlayback, removeSelectedClip, splitSelectedClip, duplicateSelectedClip, rippleDeleteSelectedClip, nudgeSelectedClip, undoTimeline, redoTimeline, createTrack, moveSelectedToTrack, selectClipById, trimClipById, setClipMedia });
+  fnsRef.current = { regenSel, renderDrafts, exportTimeline, seekTo, toggleFullscreen, togglePlayback, removeSelectedClip, splitSelectedClip, duplicateSelectedClip, rippleDeleteSelectedClip, nudgeSelectedClip, undoTimeline, redoTimeline, createTrack, moveSelectedToTrack, selectClipById, trimClipById, setClipMedia };
   useEffect(() => {
     ps.registerSuggestions("studio", [
       { label: "Play the sequence", run: () => fnsRef.current.togglePlayback(true) },
@@ -1091,6 +1117,39 @@ export default function StudioView({ ps }: { ps: PS }) {
         run: (params) => fnsRef.current.moveSelectedToTrack(String(params?.track_id || "")),
       },
       { name: "studio.remove_selected_clip", description: "Remove the selected edit clip", confirmation: "Removes a clip from the timeline", run: () => fnsRef.current.removeSelectedClip() },
+      {
+        name: "studio.set_clip_media",
+        description: "Point an uploaded/library clip (not a storyboard beat; use board.set_beat_media for those) at another hosted file, e.g. a re-recorded voice line. Optional duration. Undoable.",
+        parameters: {
+          type: "object",
+          properties: { id: { type: "string" }, url: { type: "string" }, content_type: { type: "string" }, source_duration: { type: "number" }, duration: { type: "number" } },
+          required: ["id", "url", "content_type"],
+          additionalProperties: false,
+        },
+        run: (params) => fnsRef.current.setClipMedia(String(params?.id || ""), String(params?.url || ""), String(params?.content_type || ""), params?.source_duration == null ? undefined : Number(params.source_duration), params?.duration == null ? undefined : Number(params.duration)),
+      },
+      {
+        name: "studio.select_clip",
+        description: "Select a clip by id (from studio.get_state) and move the playhead to it",
+        parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"], additionalProperties: false },
+        run: (params) => fnsRef.current.selectClipById(String(params?.id || "")),
+      },
+      {
+        name: "studio.trim_clip",
+        description: "Set a clip's exact length in seconds (and optionally its trim-in). With ripple (default) every later clip on every unlocked track moves by the change, so voice, effects and music stay in sync. Undoable.",
+        parameters: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            duration: { type: "number", minimum: 0.25 },
+            trim_in: { type: "number", minimum: 0, description: "Seconds skipped at the start of the source" },
+            ripple: { type: "boolean", description: "Default true" },
+          },
+          required: ["id", "duration"],
+          additionalProperties: false,
+        },
+        run: (params) => fnsRef.current.trimClipById(String(params?.id || ""), Number(params?.duration), params?.trim_in == null ? undefined : Number(params.trim_in), params?.ripple !== false),
+      },
     ]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

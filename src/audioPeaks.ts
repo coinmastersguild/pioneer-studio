@@ -1,5 +1,23 @@
 const waveformCache = new Map<string, Promise<number[]>>();
 
+// A timeline with dozens of audio clips used to open one AudioContext per clip, all at once; browsers cap live
+// contexts and the page stalled. Decode on one shared offline context (it never opens the audio device), two at a time.
+let offline: OfflineAudioContext | null = null;
+const decoder = () => (offline ??= new OfflineAudioContext(1, 1, 44100));
+const DECODES_AT_ONCE = 2;
+let running = 0;
+const waiting: (() => void)[] = [];
+async function queued<T>(work: () => Promise<T>): Promise<T> {
+  if (running >= DECODES_AT_ONCE) await new Promise<void>((go) => waiting.push(go));
+  running++;
+  try {
+    return await work();
+  } finally {
+    running--;
+    waiting.shift()?.();
+  }
+}
+
 function samplePeaks(buffer: AudioBuffer, sampleCount: number): number[] {
   const channels = Array.from({ length: buffer.numberOfChannels }, (_, index) => buffer.getChannelData(index));
   const block = Math.max(1, Math.floor(buffer.length / sampleCount));
@@ -25,19 +43,12 @@ export function loadAudioPeaks(url: string, sampleCount = 48): Promise<number[]>
   const key = `${sampleCount}:${url}`;
   const cached = waveformCache.get(key);
   if (cached) return cached;
-  const pending = (async () => {
+  const pending = queued(async () => {
     const response = await fetch(url);
     if (!response.ok) throw new Error(`waveform fetch failed (${response.status})`);
     const bytes = await response.arrayBuffer();
-    const Context = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!Context) throw new Error("Web Audio is unavailable");
-    const context = new Context();
-    try {
-      return samplePeaks(await context.decodeAudioData(bytes.slice(0)), sampleCount);
-    } finally {
-      void context.close();
-    }
-  })();
+    return samplePeaks(await decoder().decodeAudioData(bytes.slice(0)), sampleCount);
+  });
   waveformCache.set(key, pending);
   pending.catch(() => waveformCache.delete(key));
   return pending;
