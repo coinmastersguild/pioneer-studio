@@ -38,7 +38,10 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
 /** The document with hosted URLs swapped for asset refs, plus what it references. */
 export function toPortable(doc: unknown): { json: string; assets: Map<string, { ext: string; url: string }>; external: string[] } {
   const assets = new Map<string, { ext: string; url: string }>();
-  const json = JSON.stringify(doc).replace(HOSTED_RE, (url, sha: string, ext: string) => {
+  // A document's id names the project it lives in (Studio caches timelines by it), so it is identity, not content:
+  // the bundle leaves it blank and an import takes the new project's id (the old one stays in manifest.source).
+  const content = doc && typeof doc === "object" && !Array.isArray(doc) && "id" in doc ? { ...(doc as Record<string, unknown>), id: "" } : doc;
+  const json = JSON.stringify(content).replace(HOSTED_RE, (url, sha: string, ext: string) => {
     if (!assets.has(sha)) assets.set(sha, { ext, url });
     return `asset:${sha}`;
   });
@@ -49,6 +52,11 @@ export function toPortable(doc: unknown): { json: string; assets: Map<string, { 
 /** The inverse: asset refs back to hosted URLs. */
 export function fromPortable(json: string, urlFor: (sha256: string) => string): unknown {
   return JSON.parse(json.replace(ASSET_RE, (_ref, sha: string) => urlFor(sha)));
+}
+
+/** A restored document, given the id of the project it is being saved into. */
+export function withProjectId(doc: unknown, id: string): unknown {
+  return doc && typeof doc === "object" && !Array.isArray(doc) ? { ...(doc as Record<string, unknown>), id } : doc;
 }
 
 /**

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { exportBundle, importBundle, readBundle, sha256Hex, toPortable, verifyBundle } from "./projectBundle";
+import { exportBundle, importBundle, readBundle, sha256Hex, toPortable, verifyBundle, withProjectId } from "./projectBundle";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 async function hosted(host: string, body: string, ext: string) {
@@ -80,4 +80,11 @@ describe("project bundles", () => {
     const bundle = await readBundle(stream((await toZip(doc, store)).parts));
     await expect(importBundle(bundle, { upload: async () => ({ url: "https://x/media/o/abc.mp4", sha256: "0".repeat(64) }) })).rejects.toThrow(/different bytes/);
   });
+});
+
+test("the document id is identity, not content: bundles blank it and an import takes the new project's id", async () => {
+  const { doc } = await fixture();
+  expect(JSON.parse(toPortable(doc).json).id).toBe("");
+  expect(toPortable({ ...doc, id: "a" }).json).toBe(toPortable({ ...doc, id: "b" }).json);
+  expect((withProjectId({ id: "", x: 1 }, "p2") as { id: string }).id).toBe("p2");
 });

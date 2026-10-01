@@ -6,7 +6,7 @@
 //   bun scripts/project-bundle.ts roundtrip <projectId>              -> export, import as a copy, export again, compare, delete the copy
 // Auth: PIONEER_API_KEY in the environment. API: PIONEER_API_BASE (default https://alpha.pioneers.dev).
 import { createWriteStream } from "node:fs";
-import { exportBundle, importBundle, readBundle, shaOfUrl, verifyBundle, type BundleManifest } from "../src/projectBundle";
+import { exportBundle, importBundle, readBundle, shaOfUrl, verifyBundle, withProjectId, type BundleManifest } from "../src/projectBundle";
 
 const API = process.env.PIONEER_API_BASE ?? "https://alpha.pioneers.dev";
 const KEY = process.env.PIONEER_API_KEY;
@@ -62,11 +62,10 @@ async function importFrom(path: string, title?: string): Promise<string> {
     },
     onProgress: progress("import"),
   });
-  const created = await api("/api/v1/projects", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ title: title ?? restored.title, doc: restored.doc }),
-  });
+  // Create first, then save the document under the new project's id (Studio keys its caches by doc.id).
+  const created = await api("/api/v1/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: title ?? restored.title }) });
+  await api(`/api/v1/projects/${created.id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ doc: withProjectId(restored.doc, created.id), rev: created.rev }) });
+  console.error(`\nimported as project ${created.id}`);
   return created.id;
 }
 

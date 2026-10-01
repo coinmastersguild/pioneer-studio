@@ -1,7 +1,7 @@
 // Browser side of project bundles and checkpoints: Studio's Export / Import buttons and checkpoint list.
 // The bundle format and its integrity checks live in projectBundle.ts (shared with scripts/project-bundle.ts).
 import { API_BASE, apiFetch, authHeaders, type Project } from "./api";
-import { exportBundle, importBundle, readBundle, shaOfUrl, type BundleManifest } from "./projectBundle";
+import { exportBundle, importBundle, readBundle, shaOfUrl, withProjectId, type BundleManifest } from "./projectBundle";
 
 async function json(res: Response, what: string) {
   const body = await res.json().catch(() => ({}));
@@ -74,9 +74,14 @@ export async function importProjectFile(apiKey: string, file: File, confirm: (up
       return { url: body.url, sha256: shaOfUrl(body.url) ?? shaOfUrl(body.key ?? "") ?? "" };
     },
   });
-  return json(
-    await apiFetch(`${API_BASE}/api/v1/projects`, { method: "POST", headers: { ...authHeaders(apiKey), "content-type": "application/json" }, body: JSON.stringify({ title: restored.title, doc: restored.doc }) }),
+  // Create first, then save the document under the new project's id (Studio keys its caches by doc.id).
+  const created: Project = await json(
+    await apiFetch(`${API_BASE}/api/v1/projects`, { method: "POST", headers: { ...authHeaders(apiKey), "content-type": "application/json" }, body: JSON.stringify({ title: restored.title }) }),
     "create project",
+  );
+  return json(
+    await apiFetch(`${API_BASE}/api/v1/projects/${created.id}`, { method: "PUT", headers: { ...authHeaders(apiKey), "content-type": "application/json" }, body: JSON.stringify({ doc: withProjectId(restored.doc, created.id), rev: created.rev }) }),
+    "save project",
   );
 }
 
