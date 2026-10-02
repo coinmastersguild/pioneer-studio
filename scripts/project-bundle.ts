@@ -1,0 +1,109 @@
+#!/usr/bin/env bun
+// Project bundles from the command line (same code as Studio's Export/Import buttons).
+//   bun scripts/project-bundle.ts export <projectId> <out.pstudio>
+//   bun scripts/project-bundle.ts import <file.pstudio> [title]      -> creates a new project
+//   bun scripts/project-bundle.ts import <file.pstudio> --into <id>  -> checkpoints project <id>, then replaces its document
+//   bun scripts/project-bundle.ts verify <file.pstudio>
+//   bun scripts/project-bundle.ts roundtrip <projectId>              -> export, import as a copy, export again, compare, delete the copy
+// Auth: PIONEER_API_KEY in the environment. API: PIONEER_API_BASE (default https://alpha.pioneers.dev).
+import { createWriteStream } from "node:fs";
+import { exportBundle, importBundle, readBundle, shaOfUrl, verifyBundle, withProjectId, type BundleManifest } from "../src/projectBundle";
+
+const API = process.env.PIONEER_API_BASE ?? "https://alpha.pioneers.dev";
+const KEY = process.env.PIONEER_API_KEY;
+if (!KEY) throw new Error("PIONEER_API_KEY is not set");
+const auth = { Authorization: `Bearer ${KEY}` };
+
+async function api(path: string, init: RequestInit = {}) {
+  const res = await fetch(`${API}${path}`, { ...init, headers: { ...auth, ...(init.headers ?? {}) } });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`${init.method ?? "GET"} ${path}: ${res.status} ${body?.error ?? ""}`);
+  return body;
+}
+const progress = (verb: string) => (done: number, total: number, name: string) =>
+  process.stderr.write(`\r${verb} ${done}/${total} ${name.slice(0, 20)}        ${done === total ? "\n" : ""}`);
+
+async function exportTo(id: string, out: string): Promise<BundleManifest> {
+  const project = await api(`/api/v1/projects/${id}`);
+  const file = createWriteStream(out);
+  const manifest = await exportBundle(project, {
+    api: API,
+    fetchBytes: async (url) => {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`download ${url}: ${res.status}`);
+      return new Uint8Array(await res.arrayBuffer());
+    },
+    write: (chunk) => new Promise<void>((ok, fail) => file.write(chunk, (e) => (e ? fail(e) : ok()))),
+    onProgress: progress("export"),
+  });
+  await new Promise((ok) => file.end(ok));
+  return manifest;
+}
+
+async function open(path: string) {
+  return readBundle(Bun.file(path).stream() as unknown as AsyncIterable<Uint8Array>);
+}
+
+async function importFrom(path: string, title?: string, into?: string): Promise<string> {
+  const bundle = await open(path);
+  // Files this account already stores are not uploaded again (servers without the check: upload everything).
+  const res = await fetch(`${API}/api/v1/media/have`, { method: "POST", headers: { ...auth, "content-type": "application/json" }, body: JSON.stringify({ sha256: bundle.manifest.assets.map((a) => a.sha256) }) });
+  const have: Record<string, string> = res.status === 404 ? {} : ((await res.json()).have ?? {});
+  console.error(`${Object.keys(have).length} of ${bundle.manifest.assets.length} files already stored`);
+  const restored = await importBundle(bundle, {
+    upload: async (bytes, name) => {
+      const known = have[name.split(".")[0]];
+      if (known) return { url: known, sha256: name.split(".")[0] };
+      const form = new FormData();
+      form.append("file", new File([bytes as BlobPart], name));
+      const body = await api("/api/v1/media", { method: "POST", body: form });
+      const sha256 = shaOfUrl(body.url) ?? shaOfUrl(body.key ?? "");
+      if (!sha256) throw new Error(`upload of ${name} returned no content-addressed key`);
+      return { url: body.url, sha256 };
+    },
+    onProgress: progress("import"),
+  });
+  if (into) {  // keep the project (and its checkpoint history): checkpoint, then replace the document
+    const current = await api(`/api/v1/projects/${into}`);
+    await api(`/api/v1/projects/${into}/checkpoints`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: "before re-import" }) });
+    await api(`/api/v1/projects/${into}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ doc: withProjectId(restored.doc, into), rev: current.rev }) });
+    console.error(`\nreplaced project ${into} (checkpoint "before re-import" taken)`);
+    return into;
+  }
+  // Create first, then save the document under the new project's id (Studio keys its caches by doc.id).
+  const created = await api("/api/v1/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: title ?? restored.title }) });
+  await api(`/api/v1/projects/${created.id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ doc: withProjectId(restored.doc, created.id), rev: created.rev }) });
+  console.error(`\nimported as project ${created.id}`);
+  return created.id;
+}
+
+const [cmd, a, b] = process.argv.slice(2);
+if (cmd === "export") {
+  const m = await exportTo(a, b);
+  console.log(`exported ${m.source.title} rev ${m.source.rev}: ${m.assets.length} assets, ${m.assets.reduce((n, x) => n + x.bytes, 0)} bytes, ${m.external.length} external -> ${b}`);
+} else if (cmd === "verify") {
+  const bundle = await open(a);
+  const problems = await verifyBundle(bundle);
+  console.log(problems.length ? `FAILED\n${problems.join("\n")}` : `ok: ${bundle.manifest.assets.length} assets verified, project ${bundle.manifest.projectSha256.slice(0, 12)}`);
+  if (problems.length) process.exit(1);
+} else if (cmd === "import") {
+  const into = process.argv.indexOf("--into");
+  console.log(`project ${await importFrom(a, into > 0 ? undefined : b, into > 0 ? process.argv[into + 1] : undefined)}`);
+} else if (cmd === "roundtrip") {
+  const tmp = `${process.env.TMPDIR ?? "/tmp"}/roundtrip-${a}`;
+  const first = await exportTo(a, `${tmp}-1.pstudio`);
+  const copy = await importFrom(`${tmp}-1.pstudio`, `${first.source.title} (round-trip test)`);
+  try {
+    const second = await exportTo(copy, `${tmp}-2.pstudio`);
+    const same = (m: BundleManifest) => m.assets.map((x) => `${x.sha256}:${x.bytes}`).sort().join(); // the host picks the extension
+    const ok = second.projectSha256 === first.projectSha256 && same(second) === same(first);
+    console.log(`${ok ? "LOSSLESS" : "MISMATCH"}: project ${first.projectSha256.slice(0, 12)} vs ${second.projectSha256.slice(0, 12)}, assets ${first.assets.length} vs ${second.assets.length}`);
+    if (!ok) process.exit(1);
+  } finally {
+    await api(`/api/v1/projects/${copy}`, { method: "DELETE" });
+    console.log(`deleted test copy ${copy}`);
+  }
+} else {
+  console.log("usage: project-bundle.ts export <id> <out> | import <file> [title] | verify <file> | roundtrip <id>");
+  process.exit(2);
+}

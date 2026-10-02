@@ -563,6 +563,30 @@ export default function BoardView({ ps }: { ps: PS }) {
         },
       },
       {
+        name: "board.set_beat_media",
+        description: "Attach an existing hosted image or video (e.g. from media upload or another tool) as a beat's picture; a video becomes its final clip. Params: { id, url, content_type }",
+        parameters: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "Beat id from board.get_state" },
+            url: { type: "string", description: "https URL of the hosted file" },
+            content_type: { type: "string", description: "image/png, image/jpeg, video/mp4, …" },
+          },
+          required: ["id", "url", "content_type"],
+          additionalProperties: false,
+        },
+        run: async (params) => {
+          const p = psRef.current;
+          const id = String(params?.id || ""), url = String(params?.url || ""), type = String(params?.content_type || "");
+          if (!/^https:\/\//.test(url)) throw new Error("url must be an https URL of a hosted file");
+          if (!/^(image|video)\//.test(type)) throw new Error("content_type must be an image/* or video/* type");
+          const sb = await patchShot(p.apiKey, undefined, id, { status: "ready", result: { url, key: "", content_type: type, bytes: 0 } });
+          p.setBoard(sb);
+          if (type.startsWith("video/")) mut((pl) => { pl.beats[id] = { ...extOf(pl, id), finalClip: { url, content_type: type }, staleFinal: false }; });
+          return { ok: true, id, url };
+        },
+      },
+      {
         name: "board.render_beat",
         description: "Render one beat's still — edits its existing image when it has one. Params: { id }",
         parameters: {

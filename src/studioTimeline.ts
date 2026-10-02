@@ -516,6 +516,34 @@ export function addClip(timeline: StudioTimeline, clip: StudioClip): StudioTimel
   return insertClipAt(timeline, clip, clip.start);
 }
 
+/**
+ * Sets a clip's length (and optionally its trim-in) and ripples the whole timeline: every clip that started at or
+ * after the old end moves by the change, on every unlocked track, so picture, voice, effects and music stay in sync.
+ * Clips that end inside the cut-away part are cut to the new end; clips that run past the old end (a music bed)
+ * lengthen or shorten by the change. Locked tracks are left alone. Lengthening only reaches as far as
+ * the clip's source allows.
+ */
+export function rippleTrimClip(timeline: StudioTimeline, id: string, duration: number, trimIn?: number): StudioTimeline {
+  const clip = timeline.clips.find((item) => item.id === id);
+  if (!clip || clipTrack(timeline, id)?.locked) return timeline;
+  const nextTrimIn = trimIn == null ? clip.trimIn : Math.max(0, finite(trimIn, clip.trimIn));
+  const available = clip.sourceDuration == null ? Number.POSITIVE_INFINITY : clip.sourceDuration - nextTrimIn;
+  const nextDuration = Math.max(MIN_CLIP_DURATION, Math.min(available, finite(duration, clip.duration)));
+  const oldEnd = clip.start + clip.duration, newEnd = clip.start + nextDuration, delta = newEnd - oldEnd;
+  if (Math.abs(delta) < 1e-9 && nextTrimIn === clip.trimIn) return timeline;
+  const locked = new Set(timeline.tracks.filter((track) => track.locked).map((track) => track.id));
+  const clips = timeline.clips.map((item) => {
+    if (item.id === id) return { ...item, duration: nextDuration, trimIn: nextTrimIn, edited: true };
+    if (locked.has(item.trackId)) return item;
+    if (item.start >= oldEnd - EXPORT_EPSILON) return { ...item, start: Math.max(0, item.start + delta), edited: true };
+    const end = item.start + item.duration;
+    if (end > oldEnd + EXPORT_EPSILON) return { ...item, duration: Math.max(MIN_CLIP_DURATION, item.duration + delta), edited: true }; // runs past it
+    if (end <= newEnd + EXPORT_EPSILON) return item;
+    return { ...item, duration: Math.max(MIN_CLIP_DURATION, newEnd - item.start), edited: true }; // ends inside the cut-away part
+  });
+  return normalizeStudioTimeline({ ...timeline, clips });
+}
+
 export function removeClip(timeline: StudioTimeline, id: string): StudioTimeline {
   const clip = timeline.clips.find((item) => item.id === id);
   if (!clip || clipTrack(timeline, id)?.locked) return timeline;
