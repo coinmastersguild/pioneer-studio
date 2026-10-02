@@ -2,6 +2,7 @@
 // Project bundles from the command line (same code as Studio's Export/Import buttons).
 //   bun scripts/project-bundle.ts export <projectId> <out.pstudio>
 //   bun scripts/project-bundle.ts import <file.pstudio> [title]      -> creates a new project
+//   bun scripts/project-bundle.ts import <file.pstudio> --into <id>  -> checkpoints project <id>, then replaces its document
 //   bun scripts/project-bundle.ts verify <file.pstudio>
 //   bun scripts/project-bundle.ts roundtrip <projectId>              -> export, import as a copy, export again, compare, delete the copy
 // Auth: PIONEER_API_KEY in the environment. API: PIONEER_API_BASE (default https://alpha.pioneers.dev).
@@ -43,7 +44,7 @@ async function open(path: string) {
   return readBundle(Bun.file(path).stream() as unknown as AsyncIterable<Uint8Array>);
 }
 
-async function importFrom(path: string, title?: string): Promise<string> {
+async function importFrom(path: string, title?: string, into?: string): Promise<string> {
   const bundle = await open(path);
   // Files this account already stores are not uploaded again (servers without the check: upload everything).
   const res = await fetch(`${API}/api/v1/media/have`, { method: "POST", headers: { ...auth, "content-type": "application/json" }, body: JSON.stringify({ sha256: bundle.manifest.assets.map((a) => a.sha256) }) });
@@ -62,6 +63,13 @@ async function importFrom(path: string, title?: string): Promise<string> {
     },
     onProgress: progress("import"),
   });
+  if (into) {  // keep the project (and its checkpoint history): checkpoint, then replace the document
+    const current = await api(`/api/v1/projects/${into}`);
+    await api(`/api/v1/projects/${into}/checkpoints`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: "before re-import" }) });
+    await api(`/api/v1/projects/${into}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ doc: withProjectId(restored.doc, into), rev: current.rev }) });
+    console.error(`\nreplaced project ${into} (checkpoint "before re-import" taken)`);
+    return into;
+  }
   // Create first, then save the document under the new project's id (Studio keys its caches by doc.id).
   const created = await api("/api/v1/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: title ?? restored.title }) });
   await api(`/api/v1/projects/${created.id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ doc: withProjectId(restored.doc, created.id), rev: created.rev }) });
@@ -79,7 +87,8 @@ if (cmd === "export") {
   console.log(problems.length ? `FAILED\n${problems.join("\n")}` : `ok: ${bundle.manifest.assets.length} assets verified, project ${bundle.manifest.projectSha256.slice(0, 12)}`);
   if (problems.length) process.exit(1);
 } else if (cmd === "import") {
-  console.log(`imported as project ${await importFrom(a, b)}`);
+  const into = process.argv.indexOf("--into");
+  console.log(`project ${await importFrom(a, into > 0 ? undefined : b, into > 0 ? process.argv[into + 1] : undefined)}`);
 } else if (cmd === "roundtrip") {
   const tmp = `${process.env.TMPDIR ?? "/tmp"}/roundtrip-${a}`;
   const first = await exportTo(a, `${tmp}-1.pstudio`);
