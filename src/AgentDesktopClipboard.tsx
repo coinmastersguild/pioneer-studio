@@ -23,7 +23,7 @@ export default function AgentDesktopClipboard({ connected, onSend, receivedText 
     const confirmed = await copyDesktopClipboard(write, receivedText);
     setCopying(false);
     setMessage(confirmed ? "Desktop text copied to your clipboard."
-      : "Browser copying was not confirmed. Select the desktop text below and copy it manually.");
+      : "Browser copying was not confirmed. Select the text in Copied on desktop and copy it manually.");
   }
   return <section className="agent-desktop-clipboard" aria-label="Desktop clipboard">
     <div><label>Paste into desktop<textarea aria-label="Text to send to desktop" value={draft} maxLength={16384}

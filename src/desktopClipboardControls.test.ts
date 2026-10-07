@@ -50,7 +50,7 @@ test("desktop clipboard sends and copies only on explicit clicks, clearing the i
     expect(container.textContent).toContain("Copying to your browser clipboard");
     expect(button("Copy from desktop").disabled).toBe(true);
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 3050)); });
-    expect(container.textContent).toContain("Select the desktop text below and copy it manually");
+    expect(container.textContent).toContain("Select the text in Copied on desktop and copy it manually");
     expect(container.textContent).not.toContain("Desktop text copied to your clipboard");
     expect(button("Copy from desktop").disabled).toBe(false);
     expect(container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Text copied on desktop"]')!.value).toBe("manual fixture");
