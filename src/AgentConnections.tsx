@@ -126,7 +126,7 @@ export default function AgentConnections({ apiKey, agentId, callbackId, required
     : state.sync_pending ? "Delivering access to the agent…" : state.repositories.length ? `Granted ${granted} · not yet tested` : "Authorized · no repository chosen";
   return <section className="agent-card agent-connections" aria-label="Agent GitHub connections">
     <h3>{required ? "Connect this agent's repository" : "GitHub"}</h3>
-    <p>Your agent runs from one GitHub repository you own. It gets read-only access to that repository, so it pulls what you push. It can never push, and it can't see your other repositories.</p>
+    <p>Create one repository from the public template in your personal GitHub account. Pioneer grants read-only access to that repository, so the agent can pull what you push. The provided credential cannot push or access your other repositories.</p>
     {!state?.repositories.length && <p>No agent repository yet? <a href={AGENT_TEMPLATE_URL} target="_blank" rel="noopener noreferrer">Create one from the template</a>, then come back and sign in.</p>}
     {provisioning && <p>The agent is still starting. GitHub setup unlocks once it's ready.</p>}
     {!capabilities ? <p role="status">{stale ? "GitHub setup is unavailable right now. The agent still works." : "Checking GitHub availability…"}</p> : !available ? <p role="status">{connectionCapabilitiesMessage(capabilities)}</p> : <>

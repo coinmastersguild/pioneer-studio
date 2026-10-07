@@ -3,7 +3,7 @@ export type AgentIntent = {
   body: Record<string, unknown> | null; operationId?: string; createdAt: number;
 };
 
-// Only mutation intents are durable. Authentication and workspace contents never enter storage.
+// Agent recovery stores only mutation intents, never credentials or workspace contents.
 export function agentIntentStorageKey(owner: string, network: string): string {
   if (!/^0x[\da-f]{40}$/i.test(owner) || !["testnet", "mainnet"].includes(network)) throw new Error("Verified agent owner/network unavailable; purchases are disabled.");
   return `pioneer_agent_intents:${network}:${owner.toLowerCase()}`;

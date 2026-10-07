@@ -49,7 +49,7 @@ browser wallet explicitly. KeepKey requires its extension and desktop app.
 Agent chat supports `/claim` (or `/new`), `/pair`, `/status`, `/files`, `/edit AGENTS.md`, `/github`,
 `/credentials`, `/logs`, `/usage`, `/egress`, `/topup`, `/suspend`, `/resume`, and
 `/delete`. Purchases retain their exact request and idempotency key locally for
-recovery; authentication and workspace contents remain in memory. Mainnet
+recovery; those records contain no credentials or workspace contents. Mainnet
 purchases and Agent Zero are unavailable. Conversation and media job planning remain in Chat. Agent commands live in
 Agents. Saved Media assets can be returned to Chat from the deliverables panel;
 workspace files require an explicit save or upload before they appear in Media.
