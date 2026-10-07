@@ -22,9 +22,9 @@ test("GitHub navigation refuses credential URLs, unexpected origins and endpoint
     expect(() => githubConnectionUrl(url, "authorize")).toThrow();
 });
 
-test("bindings use explicit nonempty numeric selections and the observed revision", () => {
-  expect(repositoryBinding(connection, 7, [13, 12, 13], 4)).toEqual({ connection_id: connection, installation_id: 7, repository_ids: [12, 13], expected_revision: 4 });
-  for (const ids of [[], [0], [-1], [1.5], Array.from({ length: 501 }, (_, i) => i + 1)])
+test("bindings allow exactly one numeric repository selection and the observed revision", () => {
+  expect(repositoryBinding(connection, 7, [12], 4)).toEqual({ connection_id: connection, installation_id: 7, repository_ids: [12], expected_revision: 4 });
+  for (const ids of [[], [0], [-1], [1.5], [12, 13], [12, 12], Array.from({ length: 501 }, (_, i) => i + 1)])
     expect(() => repositoryBinding(connection, 7, ids, 4)).toThrow();
   expect(() => repositoryBinding(connection, 7, [12], -1)).toThrow();
 });
@@ -34,7 +34,7 @@ test("historical probe evidence never implies active access after expiry or pend
   const state: AgentConnection = { agent_id: agent, revision: 4, generation: 1, state: "active", repositories: [{ id: 12, full_name: "fixture/private" }], permissions: ["contents:read"], sync_pending: false,
     error_code: null, last_verified_at: now - 1000, legacy: { state: "resolved", evidence: "owner_attested" }, credential_expires_at: now + 60000 };
   expect(connectionIsVerified(state, now)).toBe(true);
-  for (const patch of [{ state: "pending_runtime" }, { sync_pending: true }, { provider_revocation_pending: true }, { credential_expires_at: now }, { repositories: [] }, { last_verified_at: null }, { legacy: { state: "unknown", evidence: null } }])
+  for (const patch of [{ state: "pending_runtime" }, { sync_pending: true }, { provider_revocation_pending: true }, { credential_expires_at: now }, { repositories: [] }, { repositories: [{ id: 12, full_name: "fixture/private" }, { id: 13, full_name: "fixture/other" }] }, { last_verified_at: null }, { legacy: { state: "unknown", evidence: null } }])
     expect(connectionIsVerified({ ...state, ...patch }, now)).toBe(false);
 });
 
