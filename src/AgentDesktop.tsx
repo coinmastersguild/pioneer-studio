@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { DesktopSocket } from "./agentRuntime";
+import { requestDesktopFullscreen } from "./agentDesktopFullscreen";
 
 /**
  * The agent's desktop, drawn by noVNC from Studio's own bundle. Alpha relays only the
@@ -11,6 +12,7 @@ export default function AgentDesktop({ socket, title, onReconnect, onClose, busy
   const shell = useRef<HTMLDivElement>(null);
   const screen = useRef<HTMLDivElement>(null);
   const [state, setState] = useState("Connecting…");
+  const [fullscreenMessage, setFullscreenMessage] = useState<string | null>(null);
   useEffect(() => {
     let rfb: { disconnect(): void; focus(): void } | null = null;
     let cancelled = false;
@@ -29,10 +31,11 @@ export default function AgentDesktop({ socket, title, onReconnect, onClose, busy
   return <div className="agent-desktop" ref={shell} role="dialog" aria-label={`${title} desktop`}>
     <div className="agent-desktop-bar">
       <strong>{title}</strong>{state && <span role="status">{state}</span>}
+      {fullscreenMessage && <span role="status">{fullscreenMessage}</span>}
       <span className="agent-desktop-actions">
         <button className="btn" disabled={busy} onClick={onReconnect}>Reconnect</button>
-        <button className="btn" onClick={() => void shell.current?.requestFullscreen?.()}>Full screen</button>
-        <button className="btn" onClick={() => { if (document.fullscreenElement) void document.exitFullscreen(); onClose(); }}>Close</button>
+        <button className="btn" onClick={() => void requestDesktopFullscreen(shell.current).then(setFullscreenMessage)}>Full screen</button>
+        <button className="btn" onClick={() => { if (document.fullscreenElement) void document.exitFullscreen().catch(() => {}); onClose(); }}>Close</button>
       </span>
     </div>
     <div className="agent-desktop-screen" ref={screen} />
