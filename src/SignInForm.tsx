@@ -1,4 +1,6 @@
 import type { WalletChoice } from "./api";
+import type { WalletOption } from "./wallets";
+import WalletPicker from "./WalletPicker";
 
 export type SignInFormProps = {
   remember: boolean;
@@ -6,7 +8,7 @@ export type SignInFormProps = {
   progress: string;
   detail: string;
   error: string;
-  onConnect: (choice: WalletChoice) => void;
+  onConnect: (choice: WalletChoice, wallet?: WalletOption) => void;
   onCancel: () => void;
   keyDraft: string;
   onKeyDraft: (value: string) => void;
@@ -17,10 +19,7 @@ export default function SignInForm(props: SignInFormProps) {
   return (
     <div className="sign-in-form">
       <fieldset disabled={!!props.progress}>
-        <div className="sign-in-wallets">
-          <button type="button" className="gate-connect" onClick={() => props.onConnect("keepkey")}>Connect KeepKey</button>
-          <button type="button" className="btn" onClick={() => props.onConnect("browser")}>Other wallet</button>
-        </div>
+        <WalletPicker busy={!!props.progress} onConnect={(wallet) => props.onConnect(wallet.kind === "keepkey" ? "keepkey" : "browser", wallet)} />
         <label className="remember-wallet">
           <input type="checkbox" checked={props.remember} onChange={(event) => props.onRemember(event.target.checked)} />
           Remember me
