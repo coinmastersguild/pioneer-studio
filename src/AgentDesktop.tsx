@@ -48,7 +48,7 @@ export default function AgentDesktop({ socket, title, onReconnect, onClose, busy
       {fullscreenMessage && <span role="status">{fullscreenMessage}</span>}
       <span className="agent-desktop-actions">
         <button className="btn" aria-expanded={clipboardOpen} onClick={() => { setClipboardOpen(!clipboardOpen); if (clipboardOpen) setReceivedText(null); }}>Clipboard</button>
-        <button className="btn" disabled={busy} onClick={onReconnect}>Reconnect</button>
+        <button className="btn" disabled={busy} onClick={() => { setClipboardOpen(false); setReceivedText(null); onReconnect(); }}>Reconnect</button>
         <button className="btn" onClick={() => void requestDesktopFullscreen(shell.current).then(setFullscreenMessage)}>Full screen</button>
         <button className="btn" onClick={() => { if (document.fullscreenElement) void document.exitFullscreen().catch(() => {}); onClose(); }}>Close</button>
       </span>
