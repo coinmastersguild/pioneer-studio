@@ -44,6 +44,17 @@ test("desktop clipboard sends and copies only on explicit clicks, clearing the i
     await act(async () => root.render(createElement(AgentDesktopClipboard, { connected: false, receivedText: null, onSend() {} })));
     expect(button("Send to desktop").disabled).toBe(true);
     expect(reads).toBe(0);
+    browser.navigator.clipboard.writeText = () => new Promise<void>(() => {});
+    await act(async () => root.render(createElement(AgentDesktopClipboard, { connected: true, receivedText: "manual fixture", onSend() {} })));
+    await act(async () => button("Copy from desktop").click());
+    expect(container.textContent).toContain("Copying to your browser clipboard");
+    expect(button("Copy from desktop").disabled).toBe(true);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 3050)); });
+    expect(container.textContent).toContain("Select the desktop text below and copy it manually");
+    expect(container.textContent).not.toContain("Desktop text copied to your clipboard");
+    expect(button("Copy from desktop").disabled).toBe(false);
+    expect(container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Text copied on desktop"]')!.value).toBe("manual fixture");
+    expect(reads).toBe(0);
   } finally {
     await act(async () => root.unmount());
     browser.happyDOM.abort();

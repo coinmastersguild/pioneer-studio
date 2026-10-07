@@ -14,3 +14,19 @@ export function sendDesktopClipboard(target: ClipboardTarget | null, connected: 
   target.clipboardPasteFrom(desktopClipboardText(text));
   try { target.focus(); } catch { /* Clipboard delivery does not depend on browser focus. */ }
 }
+
+/** A permission prompt or browser integration may leave its promise pending. */
+export async function copyDesktopClipboard(write: ((text: string) => Promise<void>) | undefined, value: unknown, timeoutMs = 3000): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const text = desktopClipboardText(value);
+    if (!write) return false;
+    // Start synchronously from the click so browser user activation is retained.
+    const pending = write(text);
+    return await Promise.race([
+      pending.then(() => true),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+    ]);
+  } catch { return false; }
+  finally { if (timer !== undefined) clearTimeout(timer); }
+}
