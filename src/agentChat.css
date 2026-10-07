@@ -21,7 +21,12 @@
 .agent-desktop-bar strong { color:var(--fg1); }
 .agent-desktop-actions { margin-left:auto; display:flex; gap:6px; }
 .agent-desktop-screen { flex:1; min-height:0; width:100%; background:#000; }
+.agent-desktop-clipboard { display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:12px; background:var(--bg-accent); color:var(--fg1); max-height:45vh; overflow:auto; flex-shrink:0; }
+.agent-desktop-clipboard label { display:block; font-size:12px; }
+.agent-desktop-clipboard textarea { display:block; width:100%; margin:6px 0; padding:8px; resize:vertical; color:var(--fg1); background:var(--bg); border:1px solid var(--border-strong); box-sizing:border-box; }
+.agent-desktop-clipboard p { grid-column:1 / -1; margin:0; font-size:12px; color:var(--fg3); }
 @media(max-width:700px) { .agent-desktop-bar > [role="status"] { display:none; } }
+@media(max-width:700px) { .agent-desktop-clipboard { grid-template-columns:1fr; } }
 
 .agent-chat { overflow:auto; }
 .agent-transcript { flex:1 0 220px; }

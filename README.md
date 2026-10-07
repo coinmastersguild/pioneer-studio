@@ -81,6 +81,11 @@ agent's visible browser and installed desktop applications. Use **Full screen**,
 ticket for that agent; the ticket never appears in the URL, and no agent-hosted
 page runs in Studio's origin. If its inference budget is exhausted, an observed
 running desktop remains viewable; tasks still require a top-up.
+Use **Clipboard** to paste text into its field and explicitly **Send to desktop**,
+then press Ctrl+V in the desktop. Text copied inside the desktop can be copied
+back with **Copy from desktop**. Transfers are limited to 16 KiB, kept in the
+open viewer's memory, and cleared on reconnect, disconnect or close. Studio
+never reads your browser clipboard automatically.
 
 The hosted runtime uses the public
 [Pioneer OpenHuman fork](https://github.com/coinmastersguild/openhuman).
