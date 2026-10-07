@@ -108,7 +108,7 @@ export type HostedAgent = {
   /** Runtime state from the bound repository. Absent until Alpha ships repo runs. */
   source?: { full_name: string; commit: string | null; synced_at: number | null } | null;
   unlocked?: boolean;
-  live: { budget_tokens: number; used_tokens: number; remaining_tokens: number; state?: string; status?: string } | null;
+  live: { budget_tokens: number; used_tokens: number; remaining_tokens: number; state?: string; status?: string; container?: string } | null;
 };
 export type AgentCatalog = {
   network: string; tokens_per_credit: number | null; purchasing_enabled: boolean;

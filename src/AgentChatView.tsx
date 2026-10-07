@@ -4,7 +4,7 @@ import { AgentApiError, agentMutation, agentRequest, fetchAccount, openAgentDesk
 import { agentIntentStorageKey, canReplayAgentIntent, loadAgentIntents, loadAgentSetup, saveAgentSetup, selectVisibleAgent, pendingIntentSummary, newAgentIntent, parseAgentCommand, saveAgentIntents, type AgentIntent } from "./hostedAgents";
 import type { PS } from "./shared";
 import AgentConnections from "./AgentConnections";
-import { desktopSocket, unlockKey, type DesktopSocket } from "./agentRuntime";
+import { agentDesktopReady, desktopSocket, unlockKey, type DesktopSocket } from "./agentRuntime";
 import AgentDesktop from "./AgentDesktop";
 import { connectionReturn, connectionAvailabilityError, verifyAgentGithubSetup, connectionCapabilitiesMessage, agentRequiresGithub, agentGithubReady } from "./agentConnectionState";
 import { agentReplyPlaceholder, observeAgentReply, type AgentReplyState } from "./agentReply";
@@ -76,6 +76,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
   const claimsReady = githubAvailable && catalog?.setup_required === true && !!catalog.templates?.includes("openhuman");
   const features = catalog?.features || {};
   const runtimeReady = !!agent && agent.status === "running" && !pending && (!setupRequired || setupReady);
+  const desktopReady = agentDesktopReady(agent, pending, !setupRequired || setupReady);
 
   function say(text: string, role: Entry["role"] = "studio") {
     setEntries((prev) => [...prev, { id: crypto.randomUUID(), role, text }]);
@@ -365,7 +366,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
       run: () => guarded((key) => execute(intent, key)) });
   }
   async function openDesktop() {
-    if (!agent || !runtimeReady || desktopController.current) return;
+    if (!agent || !desktopReady || desktopController.current) return;
     const key = ps.apiKey; const id = agent.id;
     const abort = new AbortController(); desktopController.current = abort;
     setDesktopBusy(true);
@@ -429,7 +430,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
         <button className="btn" disabled={busy || !!confirmation || !!editor || connectionsOpen} onClick={() => void guarded((key, signal) => command("files", "", key, signal))}>Workspace files</button>
         <button className="btn" title={features.unlock ? "Give the agent the key that decrypts its .env" : "Waiting for Alpha to enable unlock"} disabled={!features.unlock || !runtimeReady || busy} onClick={() => setUnlockOpen(true)}>{agent.unlocked ? "Unlocked" : "Unlock"}</button>
         <button className="btn" title={features.sync ? "Pull the latest commit and restart the agent" : "Waiting for Alpha to enable Pull & restart"} disabled={!features.sync || !runtimeReady || busy || !!confirmation} onClick={confirmSync}>Pull &amp; restart</button>
-        <button className="btn" title={features.desktop ? "Open the agent's desktop" : "Waiting for Alpha to enable the desktop"} disabled={!features.desktop || !runtimeReady || desktopBusy} onClick={() => void openDesktop()}>Desktop</button></>}
+        <button className="btn" title={features.desktop ? "Open the agent's desktop" : "Waiting for Alpha to enable the desktop"} disabled={!features.desktop || !desktopReady || desktopBusy} onClick={() => void openDesktop()}>Desktop</button></>}
       <button className="btn" disabled={busy || !!confirmation} onClick={() => void guarded((key, signal) => refresh(key, signal))}>Refresh agents</button>
     </div>
     <div className="agent-list-status" role="status">

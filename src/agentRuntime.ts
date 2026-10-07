@@ -1,4 +1,4 @@
-import { API_BASE } from "./api";
+import { API_BASE, type HostedAgent } from "./api";
 
 /** Public template every agent repository starts from. GitHub creates the repo under the user's own account. */
 export const AGENT_TEMPLATE_URL = "https://github.com/new?template_owner=coinmastersguild&template_name=agent-template";
@@ -11,6 +11,13 @@ export function unlockKey(value: string): string {
 }
 
 export type DesktopSocket = { url: string; protocols: string[] };
+
+/** Viewing a live desktop does not consume inference tokens. Alpha admits the session. */
+export function agentDesktopReady(agent: Pick<HostedAgent, "template" | "status" | "live"> | undefined, pending: boolean, setupReady: boolean): boolean {
+  return !!agent && agent.template === "openhuman" && ["running", "paused_budget"].includes(agent.status) &&
+    !pending && setupReady && agent.live?.container === "running" &&
+    agent.live.state === "running" && agent.live.status === "active";
+}
 
 /**
  * Desktop sessions are a VNC WebSocket relayed by Alpha for this agent only. The

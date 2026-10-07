@@ -79,7 +79,8 @@ Pull & restart retains the in-memory key.
 agent's visible browser and installed desktop applications. Use **Full screen**,
 **Reconnect**, or **Close** in the viewer. Alpha issues a single-use connection
 ticket for that agent; the ticket never appears in the URL, and no agent-hosted
-page runs in Studio's origin.
+page runs in Studio's origin. If its inference budget is exhausted, an observed
+running desktop remains viewable; tasks still require a top-up.
 
 The hosted runtime uses the public
 [Pioneer OpenHuman fork](https://github.com/coinmastersguild/openhuman).
