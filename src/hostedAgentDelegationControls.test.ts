@@ -75,7 +75,7 @@ async function mounted(options: { interrupted?: boolean; agents?: boolean; model
     await act(async () => root.unmount()); browser.happyDOM.abort(); globalThis.fetch = originalFetch; clearActions();
     for (const [name, descriptor] of descriptors) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name); }
   };
-  return { container, requests, handlers, modes, click, settle, cleanup, async switchOwner() { ps.apiKey="synthetic-other-owner-key"; await act(async () => root.render(createElement("div", {}, createElement(ChatView, { ps }), createElement(AgentChatView, { ps, active: options.agentActive || false })))); }, finishReply() { try { finishReply?.(); } catch { /* A cancelled fixture stream is closed. */ } }, setStatus(status: string) { agent.status = status; } };
+  return { container, requests, handlers, modes, click, settle, cleanup, async setAgentActive(active: boolean) { options.agentActive=active; await act(async()=>root.render(createElement("div", {}, createElement(ChatView,{ps}),createElement(AgentChatView,{ps,active})))); }, async switchOwner() { ps.apiKey="synthetic-other-owner-key"; await act(async () => root.render(createElement("div", {}, createElement(ChatView, { ps }), createElement(AgentChatView, { ps, active: options.agentActive || false })))); }, finishReply() { try { finishReply?.(); } catch { /* A cancelled fixture stream is closed. */ } }, setStatus(status: string) { agent.status = status; } };
 }
 
 const messages = (calls: Awaited<ReturnType<typeof mounted>>["requests"]) => calls.filter((r) => r.url.pathname.endsWith("/messages"));
@@ -319,5 +319,33 @@ test("a completed inline selection intent cannot dispatch its old goal again", a
     await view.click("Use this agent");expect(messages(view.requests)).toHaveLength(1);
     expect([...view.container.querySelectorAll("button")].some(b=>b.textContent==="Use this agent")).toBe(false);
     await act(async()=>button.click());await view.settle();expect(messages(view.requests)).toHaveLength(1);
+  } finally {await view.cleanup();}
+});
+
+
+test("two inline chooser callbacks cannot retarget the earlier goal to the other chosen agent", async () => {
+  const view=await mounted({multiple:true});
+  try {
+    await act(async()=>{await view.handlers.chat!("tell the agent to research volcanoes");await view.handlers.chat!("tell the agent to research oceans");});await view.settle();
+    const selects=[...view.container.querySelectorAll<HTMLSelectElement>('select[aria-label="Choose task agent"]')];
+    await act(async()=>{selects[0].value=agentId;selects[0].dispatchEvent(new window.Event("change",{bubbles:true}));selects[1].value=otherId;selects[1].dispatchEvent(new window.Event("change",{bubbles:true}));});
+    const buttons=[...view.container.querySelectorAll<HTMLButtonElement>("button")].filter(b=>b.textContent==="Use this agent");
+    await act(async()=>{buttons[0].click();buttons[1].click();});await view.settle();
+    expect(messages(view.requests)).toHaveLength(1);expect(messages(view.requests)[0].url.pathname).toBe(`/api/v1/agents/${otherId}/messages`);
+    expect(messages(view.requests)[0].body.content).toContain("research oceans");expect(messages(view.requests)[0].body.content).not.toContain("research volcanoes");
+  } finally {await view.cleanup();}
+});
+
+test("a task begun in Agents can expose its existing output inline in Chat after navigation", async () => {
+  const view=await mounted({deferred:true,agentActive:true});
+  try {
+    await act(async()=>{void view.handlers.agents!("make a cat video");});await view.settle();
+    await view.setAgentActive(false);await view.settle();
+    await act(async()=>{void view.handlers.chat!("tell the agent to make another cat video");});await view.settle();
+    expect(messages(view.requests)).toHaveLength(1);
+    await act(async()=>view.finishReply());await view.settle();
+    expect(view.container.querySelector('video[aria-label="Agent video deliverable"]')).not.toBeNull();
+    expect(view.requests.filter(r=>r.url.searchParams.get("download")==="true"&&r.url.searchParams.get("path")?.endsWith(".mp4"))).toHaveLength(1);
+    expect(view.container.textContent).toContain("new request was not sent");
   } finally {await view.cleanup();}
 });
