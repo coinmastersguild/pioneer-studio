@@ -293,3 +293,16 @@ test("free video-to-skeleton and video information keep their own routes rather 
     expect(messages(view.requests)).toHaveLength(0);expect(view.requests.filter(r=>r.url.pathname==="/api/v1/jobs")).toHaveLength(0);
   } finally {await view.cleanup();}
 });
+
+
+test("an inline consequential review is bound to the originally reviewed owned agent", async () => {
+  const view=await mounted({multiple:true});
+  try {
+    await act(async()=>{await callAction("agents.select",{agent_id:agentId});});
+    await act(async()=>{await view.handlers.chat!("tell the agent to publish a tweet");});await view.settle();
+    expect(view.container.textContent).toContain("Synthetic owner agent");expect(messages(view.requests)).toHaveLength(0);
+    await act(async()=>{await callAction("agents.select",{agent_id:otherId});});
+    await view.click("Confirm agent task");
+    expect(messages(view.requests)).toHaveLength(0);expect(view.container.textContent).toContain("No task was sent");
+  } finally {await view.cleanup();}
+});
