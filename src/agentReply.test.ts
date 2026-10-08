@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { AgentApiError, agentRequest, streamAgentMessage } from "./api";
+import { AgentApiError, agentRequest, streamAgentMessage, unlockAgent } from "./api";
 import { agentReplyPlaceholder, observeAgentReply, type AgentReplyState } from "./agentReply";
 
 const originalFetch = globalThis.fetch;
@@ -171,4 +171,15 @@ test("malformed stream data and a stop frame without DONE cannot silently comple
     await expect(streamAgentMessage("fixture-owner", id, "Inspect output", "stable-conversation", () => {})).rejects.toThrow();
     expect(calls).toBe(1);
   }
+});
+
+test("unlock success requires the runtime's explicit unlocked true acknowledgment", async () => {
+  let calls = 0;
+  globalThis.fetch = (async () => { calls++; return Response.json({ unlocked: true }); }) as typeof fetch;
+  expect(await unlockAgent("fixture-owner", id, "fixture-unlock-key")).toEqual({ unlocked: true });
+  for (const result of [{ unlocked: false }, { unlocked: "true" }, {}, null]) {
+    globalThis.fetch = (async () => { calls++; return Response.json(result); }) as typeof fetch;
+    await expect(unlockAgent("fixture-owner", id, "fixture-unlock-key")).rejects.toThrow("did not confirm");
+  }
+  expect(calls).toBe(5);
 });
