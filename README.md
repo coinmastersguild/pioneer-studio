@@ -112,7 +112,10 @@ Tool work may take up to 15 minutes, and the reply arrives as completed content;
 chat is not an incremental token or tool-event feed. Watch the desktop or logs
 while waiting. If a reply is
 interrupted, review status, files and logs and explicitly confirm that review
-before continuing; Studio never replays a non-idempotent task automatically.
+before continuing. Studio checks the server turn state and will not clear a
+running turn. An uncertain turn requires an explicit confirmation that it has
+stopped; elapsed time alone does not allow another task in that conversation.
+Studio never replays a non-idempotent task automatically.
 Runtime replacement closes a desktop from the previous observed generation;
 open a new session after readiness settles.
 

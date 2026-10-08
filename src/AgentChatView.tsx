@@ -8,6 +8,7 @@ import { agentDesktopReady, desktopSocket, unlockKey, type DesktopSocket } from 
 import AgentDesktop from "./AgentDesktop";
 import AgentWorkspace from "./AgentWorkspace";
 import AgentMemoryPanel from "./AgentMemoryPanel";
+import { inspectAgentTurnRecovery, confirmAgentTurnRecovery } from "./agentTurnRecovery";
 import { AgentConversations, desktopRuntimeChanged, desktopRuntimeUnavailable, type DesktopRuntimeBinding } from "./agentConversation";
 import { canEditWorkspaceFile, workspaceText, type AgentFileArea } from "./agentWorkspaceFiles";
 import { connectionReturn, connectionAvailabilityError, verifyAgentGithubSetup, connectionCapabilitiesMessage, agentRequiresGithub, agentGithubReady } from "./agentConnectionState";
@@ -17,7 +18,7 @@ import "./agentChat.css";
 type Entry = { id: string; role: "user" | "agent" | "studio"; text: string; replyState?: AgentReplyState };
 const EMPTY_ENTRIES: Entry[] = [];
 type Editor = { path: string; content: string; agentId: string; area: AgentFileArea };
-type Confirmation = { title: string; detail: string; restoreText?: string; run: () => Promise<void> };
+type Confirmation = { title: string; detail: string; restoreText?: string; confirmLabel?: string; run: () => Promise<void> };
 
 export default function AgentChatView({ ps, active = true }: { ps: PS; active?: boolean }) {
   const [catalog, setCatalog] = useState<AgentCatalog | null>(null);
@@ -375,6 +376,26 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
     } catch (e) { if (!(e instanceof AgentApiError) || e.status !== 404) throw e; }
     if (!signal.aborted) setEditor({ agentId: agent.id, path, content, area });
   }
+  async function reviewPreviousTurn() {
+    if (!agent) return;
+    const id = agent.id;
+    const conversation = conversations.current;
+    const session = conversation.forAgent(id);
+    await guarded(async (key, signal) => {
+      const observed = await inspectAgentTurnRecovery(key, id, session, signal);
+      if (signal.aborted) return;
+      const stopped = observed.state === "uncertain";
+      setConfirmation({ title: stopped ? "Confirm the previous task has stopped" : "Continue this conversation?",
+        detail: stopped ? "The server could not confirm that the previous task finished. Check its desktop, files and logs. Confirm only after you know it has stopped; this does not cancel or resend the task."
+          : "The server reports no active turn. Confirm that you reviewed the interrupted task and its outputs; this does not resend it.",
+        confirmLabel: stopped ? "I confirmed the previous task has stopped" : "I reviewed the outputs",
+        run: () => guarded(async (currentKey, currentSignal) => {
+          await confirmAgentTurnRecovery(currentKey, id, session, observed, currentSignal);
+          if (!currentSignal.aborted && conversations.current === conversation) { conversation.reviewed(id); tick((value) => value + 1); setError(""); }
+        }),
+      });
+    });
+  }
   function confirmSync() {
     if (!agent) return;
     // A durable intent like purchases: stored per owner/network before dispatch and retried
@@ -548,9 +569,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
       {memoryOpen && agent && <AgentMemoryPanel key={`${authSession.current.id}:${agent.id}`} apiKey={ps.apiKey} agentId={agent.id} onClose={() => setMemoryOpen(false)} />}
       {agent && conversations.current.needsReview(agent.id) && <div className="agent-card agent-confirm" role="status"><h3>Review the interrupted task</h3>
         <p>The previous request ended without confirmation. It may still be running and may have performed work. Check status, saved files and runtime logs before sending another task. Studio will not replay it.</p>
-        <button className="btn" disabled={busy || !!confirmation} onClick={() => setConfirmation({ title: "Continue this conversation?",
-          detail: "Confirm that you reviewed the interrupted task and its outputs. This does not cancel it or resend it.",
-          run: async () => { conversations.current.reviewed(agent.id); tick((value) => value + 1); setError(""); } })}>I reviewed progress</button></div>}
+        <button className="btn" disabled={busy || !!confirmation} onClick={() => void reviewPreviousTurn()}>Review previous task</button></div>}
       {editor && <form className="agent-card" onSubmit={(e) => {
         e.preventDefault(); const draft = { ...editor };
         try { validateAgentPath(draft.path); } catch (e) { report(e); return; }
@@ -560,7 +579,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
         <p>Edits here change the running agent only. Make lasting changes in your repository, then Pull &amp; restart.</p>
         <label>File contents<textarea rows={12} spellCheck={false} value={editor.content} onChange={(e) => setEditor({ ...editor, content: e.target.value })} /></label>
         <button className="btn" disabled={busy || !!confirmation}>Review save</button> <button type="button" className="btn" onClick={() => { setConfirmation(null); setEditor(null); }}>Discard</button></form>}
-      {confirmation && <div className="agent-card agent-confirm"><h3>{confirmation.title}</h3><pre>{confirmation.detail}</pre><button className="btn" disabled={busy} onClick={() => { const action = confirmation; setConfirmation(null); void action.run(); }}>Confirm</button> <button className="btn" disabled={busy} onClick={() => { if (confirmation.restoreText) setInput(confirmation.restoreText); setConfirmation(null); }}>Cancel</button></div>}
+      {confirmation && <div className="agent-card agent-confirm"><h3>{confirmation.title}</h3><pre>{confirmation.detail}</pre><button className="btn" disabled={busy} onClick={() => { const action = confirmation; setConfirmation(null); void action.run(); }}>{confirmation.confirmLabel || "Confirm"}</button> <button className="btn" disabled={busy} onClick={() => { if (confirmation.restoreText) setInput(confirmation.restoreText); setConfirmation(null); }}>Cancel</button></div>}
       {error && <p role="alert" className="agent-error">{error}</p>}
     </div>
     <form className="agent-composer" onSubmit={(e) => { e.preventDefault(); void submit(); }}>
