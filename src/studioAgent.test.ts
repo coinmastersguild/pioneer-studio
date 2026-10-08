@@ -141,6 +141,32 @@ test("explicit delegation never reaches a model that could choose an available p
   } finally { globalThis.fetch = original; }
 });
 
+test("failed hosted-task preparation cannot resume a model round or substitute a paid job", async () => {
+  clearActions();
+  let paidJobs = 0; let modelCalls = 0;
+  registerActions([
+    { name: "agents.delegate", description: "Prepare a task", run: () => { throw new Error("Selected agent is busy; review its current task."); } },
+    { name: "jobs.submit", description: "An available paid job", run: () => { paidJobs++; } },
+  ]);
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    modelCalls++;
+    return Response.json({ choices: [{ message: { content: "Rendering instead", tool_calls: [
+      { id: "fallback", type: "function", function: { name: "jobs_submit", arguments: "{}" } },
+    ] } }] });
+  }) as typeof fetch;
+  try {
+    const turn = await beginStudioAgentTurn("test-key", "tell the agent to make a cat video", { mode: "head", board: null });
+    const result = await executeStudioAction(turn.actions[0]);
+    expect(result.error).toContain("busy");
+    const next = await continueStudioAgentTurn("test-key", turn, [result]);
+    expect(next.actions).toHaveLength(0);
+    expect(next.assistant.content).toContain("could not be prepared");
+    expect(await finishStudioAgentTurn("test-key", turn, [result])).toContain("could not be prepared");
+    expect(modelCalls).toBe(0); expect(paidJobs).toBe(0);
+  } finally { globalThis.fetch = original; }
+});
+
 test("agent turns retain history and continue through multiple action rounds", async () => {
   let total = 0;
   registerActions([
