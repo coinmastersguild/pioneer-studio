@@ -5,6 +5,7 @@ import { attachShotResult, fetchMedia, generateShot, patchShot, type JobModel, t
 import { pickModel } from "./pipeline";
 import type { PS } from "./shared";
 import { classifyJobModel } from "./jobCatalog";
+import { prepareGenerationJob } from "./generationJob";
 
 const inFlight = new Set<string>(); // shotIds being polled — shared across views
 
@@ -97,6 +98,13 @@ export async function renderShot(
   if ((shot.model || shot.endpoint) && !model && !compatible(existing)) throw new Error("The stored image endpoint is unavailable or incompatible. Select a live image endpoint before rendering.");
   if (refs.length && (!refModel || (explicit && classifyJobModel(explicit) !== "image_refs"))) {
     throw new Error("No compatible reference-image endpoint is selected. References were not dropped.");
+  }
+  // A still-generation request only supplies its prompt. An image output alone
+  // does not make an edit/transform endpoint usable without its required input.
+  if (!refs.length) {
+    const selected = explicit || existing || pickModel(ps.models, "image");
+    if (!compatible(selected)) throw new Error("No compatible live image endpoint is available.");
+    prepareGenerationJob(ps.models, ps.media, { model: selected.model, endpoint: selected.endpoint, params: { prompt: shot.prompt } });
   }
   if (!shot.model || !shot.endpoint || model || refModel) {
     const def = explicit || refModel || pickModel(ps.models, "image");
