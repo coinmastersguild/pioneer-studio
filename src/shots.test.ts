@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { addShot, closeProject, deleteShot, type JobModel } from "./api";
+import { addShot, closeProject, deleteShot, patchShot, type JobModel } from "./api";
 import type { PS } from "./shared";
 import { renderShot } from "./shots";
 
@@ -43,5 +43,16 @@ test("a still render uses a compatible live schema and refuses stale catalogs or
     await renderShot(ps, shot);
     expect(requests).toHaveLength(1);
     expect(requests[0]).toMatchObject({ model: image.model, endpoint: image.endpoint, params: { prompt: shot.prompt } });
+  });
+});
+
+test("image transforms cannot be submitted as still generation without their required image input", async () => {
+  await fixture(async (ps, shot, requests) => {
+    const edit: JobModel = { ...image, endpoint: "edit", params: { prompt: { type: "str", required: true }, image: { type: "path-or-url", required: true } } };
+    ps.models = [edit];
+    await expect(renderShot(ps, shot, { model: edit.model, endpoint: edit.endpoint })).rejects.toThrow("image is required");
+    const stored = await patchShot(ps.apiKey, undefined, shot.id, { model: edit.model, endpoint: edit.endpoint });
+    await expect(renderShot(ps, stored.shots[0])).rejects.toThrow("image is required");
+    expect(requests).toHaveLength(0);
   });
 });
