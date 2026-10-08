@@ -219,3 +219,11 @@ test("direct hosted-task outcomes stop every tool loop without a model-generated
     expect(modelCalls).toBe(0);
   } finally {globalThis.fetch=original;}
 });
+
+
+test("inline owner selection is callable by its UI but cannot be chosen by a model tool", async () => {
+  clearActions();let selected=0;
+  registerActions([{name:"agents.select",advertise:false,description:"Choose owned target",run:()=>{selected++;return{selected:true};}}]);
+  expect(actionTools().some(t=>t.function.name==="agents_select")).toBe(false);
+  await callAction("agents.select",{agent_id:"fixture"});expect(selected).toBe(1);
+});

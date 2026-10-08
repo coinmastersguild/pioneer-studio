@@ -282,3 +282,14 @@ test("account changes discard pending delegated progress and never expose old ou
     expect(view.requests.some(r=>r.authorization==="Bearer synthetic-other-owner-key" && r.url.searchParams.get("download")==="true")).toBe(false);
   } finally { await view.cleanup(); }
 });
+
+
+test("free video-to-skeleton and video information keep their own routes rather than dispatching authoring", async () => {
+  const view=await mounted({ plan: { say: "Videos can be saved as MP4." } });
+  try {
+    await act(async()=>{await view.handlers.chat!("Make a skeleton from this video");});await view.settle();
+    expect(view.container.textContent).toContain("Video → skeleton"); expect(messages(view.requests)).toHaveLength(0);
+    await act(async()=>{await view.handlers.chat!("How do you create videos?");});await view.settle();
+    expect(messages(view.requests)).toHaveLength(0);expect(view.requests.filter(r=>r.url.pathname==="/api/v1/jobs")).toHaveLength(0);
+  } finally {await view.cleanup();}
+});

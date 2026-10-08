@@ -73,3 +73,9 @@ test("video task preparation requires actual visual framing and lighting review,
   const task=prepareHostedAgentTask("tell the agent to make a neon cat animation");
   expect(task).toContain("visually inspect"); expect(task).toContain("complete subject framing"); expect(task).toContain("requested lighting");
 });
+
+
+test("video information requests do not authorize an authoring task", () => {
+  for (const question of ["What video formats are supported?", "How do you create videos?", "Does video support MP4?", "Explain how to generate video"]) expect(unavailableVideoRequest(question,[],false)).toBe(false);
+  expect(unavailableVideoRequest("Can you make a cat video?",[],false)).toBe(true);
+});
