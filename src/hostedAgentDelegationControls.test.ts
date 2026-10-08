@@ -75,7 +75,7 @@ async function mounted(options: { interrupted?: boolean; agents?: boolean; model
     await act(async () => root.unmount()); browser.happyDOM.abort(); globalThis.fetch = originalFetch; clearActions();
     for (const [name, descriptor] of descriptors) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name); }
   };
-  return { container, requests, handlers, modes, click, settle, cleanup, async setAgentActive(active: boolean) { options.agentActive=active; await act(async()=>root.render(createElement("div", {}, createElement(ChatView,{ps}),createElement(AgentChatView,{ps,active})))); }, async switchOwner() { ps.apiKey="synthetic-other-owner-key"; await act(async () => root.render(createElement("div", {}, createElement(ChatView, { ps }), createElement(AgentChatView, { ps, active: options.agentActive || false })))); }, finishReply() { try { finishReply?.(); } catch { /* A cancelled fixture stream is closed. */ } }, setStatus(status: string) { agent.status = status; } };
+  return { container, requests, handlers, modes, click, settle, cleanup, async setAgentActive(active: boolean) { options.agentActive=active; ps.mode=active?"agents":"chat"; await act(async()=>root.render(createElement("div", {}, createElement(ChatView,{ps}),createElement(AgentChatView,{ps,active})))); }, async switchOwner() { ps.apiKey="synthetic-other-owner-key"; await act(async () => root.render(createElement("div", {}, createElement(ChatView, { ps }), createElement(AgentChatView, { ps, active: options.agentActive || false })))); }, finishReply() { try { finishReply?.(); } catch { /* A cancelled fixture stream is closed. */ } }, setStatus(status: string) { agent.status = status; } };
 }
 
 const messages = (calls: Awaited<ReturnType<typeof mounted>>["requests"]) => calls.filter((r) => r.url.pathname.endsWith("/messages"));
@@ -347,5 +347,17 @@ test("a task begun in Agents can expose its existing output inline in Chat after
     expect(view.container.querySelector('video[aria-label="Agent video deliverable"]')).not.toBeNull();
     expect(view.requests.filter(r=>r.url.searchParams.get("download")==="true"&&r.url.searchParams.get("path")?.endsWith(".mp4"))).toHaveLength(1);
     expect(view.container.textContent).toContain("new request was not sent");
+  } finally {await view.cleanup();}
+});
+
+
+test("navigating from Chat to Agents only downloads the visible task artifact", async () => {
+  const view=await mounted({deferred:true});
+  try {
+    await act(async()=>{void view.handlers.chat!(text);});await view.settle();
+    await view.setAgentActive(true);await view.settle();
+    await act(async()=>view.finishReply());await view.settle();
+    expect(messages(view.requests)).toHaveLength(1);
+    expect(view.requests.filter(r=>r.url.searchParams.get("download")==="true"&&r.url.searchParams.get("path")?.endsWith(".mp4"))).toHaveLength(1);
   } finally {await view.cleanup();}
 });
