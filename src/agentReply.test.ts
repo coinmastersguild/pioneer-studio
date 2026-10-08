@@ -173,6 +173,18 @@ test("malformed stream data and a stop frame without DONE cannot silently comple
   }
 });
 
+test("an explicit error event cannot complete a task through empty data or a DONE marker", async () => {
+  for (const event of ["event: error\ndata: [DONE]\n\n", "event: error\ndata:\n\ndata: [DONE]\n\n"]) {
+    let calls = 0;
+    const states: AgentReplyState[] = [];
+    globalThis.fetch = (async () => { calls++; return response(event); }) as typeof fetch;
+    await expect(observeAgentReply(() => streamAgentMessage("fixture-owner", id, "Inspect output", "stable-conversation", () => {}),
+      (state) => states.push(state))).rejects.toThrow("Agent stream failed");
+    expect(states).toEqual(["streaming", "interrupted"]);
+    expect(calls).toBe(1);
+  }
+});
+
 test("unlock success requires the runtime's explicit unlocked true acknowledgment", async () => {
   let calls = 0;
   globalThis.fetch = (async () => { calls++; return Response.json({ unlocked: true }); }) as typeof fetch;
