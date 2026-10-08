@@ -226,6 +226,7 @@ test("a running direct task stays inline and repeated requests join progress wit
     const chat = view.container.querySelector(".chat-view");
     expect(chat?.textContent || view.container.textContent).toContain("Synthetic finished video reply.");
     expect(view.container.querySelectorAll('video[aria-label="Agent video deliverable"]').length).toBeGreaterThan(0);
+    expect(view.requests.filter(r=>r.url.searchParams.get("download")==="true" && r.url.searchParams.get("path")?.endsWith(".mp4"))).toHaveLength(1);
     expect(view.modes).not.toContain("agents");
     expect(view.requests.some((r) => r.url.pathname === "/api/v1/jobs" || r.url.pathname === "/api/v1/chat/completions")).toBe(false);
   } finally { await view.cleanup(); }
