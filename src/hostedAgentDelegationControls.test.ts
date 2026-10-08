@@ -201,3 +201,15 @@ test("the direct Agents composer prepares the same unique MP4 task and owner con
     await view.click("Confirm"); expect(messages(view.requests)).toHaveLength(1); expect(messages(view.requests)[0].body.content).toMatch(/studio-[0-9a-f-]{36}\.mp4/);
   } finally { await view.cleanup(); }
 });
+
+
+test("delegation tools cannot turn a slash lifecycle command or oversized task into a management operation", async () => {
+  for (const task of ["/delete purge", "x".repeat(16 * 1024)]) {
+    const view = await mounted();
+    try {
+      await act(async () => { await expect(callAction("agents.delegate", { task })).rejects.toThrow(); }); await view.settle();
+      expect(view.requests.filter((r) => r.method !== "GET")).toHaveLength(0);
+      expect(view.container.querySelector(".agent-confirm") === null).toBe(true);
+    } finally { await view.cleanup(); }
+  }
+});
