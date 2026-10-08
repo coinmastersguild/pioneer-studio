@@ -4,6 +4,7 @@
 import { attachShotResult, fetchMedia, generateShot, patchShot, type JobModel, type Shot } from "./api";
 import { pickModel } from "./pipeline";
 import type { PS } from "./shared";
+import { classifyJobModel } from "./jobCatalog";
 
 const inFlight = new Set<string>(); // shotIds being polled — shared across views
 
@@ -59,6 +60,7 @@ export async function renderShot(
   shot: Shot,
   opts?: { refs?: string[]; model?: string; endpoint?: string; editFrom?: string; editPrompt?: string },
 ): Promise<void> {
+  if (ps.catalogAvailable === false) throw new Error("The generation catalog is unavailable. No image job was started.");
   if (!ps.apiKey) {
     ps.toast("Paste your sk-pioneer key first");
     return;
@@ -70,8 +72,7 @@ export async function renderShot(
   if (opts?.editFrom) {
     const { model: editModel, params } = imageEditPlan(ps.models, opts.editFrom, opts.refs, opts.editPrompt);
     if (!editModel) {
-      ps.toast("No image-edit model on this account — nothing to edit with");
-      return;
+      throw new Error("No compatible live image-edit endpoint is available.");
     }
     ps.setBoard(await patchShot(ps.apiKey, undefined, shot.id, { model: editModel.model, endpoint: editModel.endpoint }));
     // params override the shot's own prompt server-side, so a repair
@@ -89,18 +90,17 @@ export async function renderShot(
   // the cheap fast placeholder tier. ≤4 refs (multi_reference limit).
   const refs = (opts?.refs || []).filter(Boolean).slice(0, 4);
   const refModel = refs.length ? pickModel(ps.models, "image_refs") : undefined;
+  const compatible = (entry: JobModel | undefined): entry is JobModel => !!entry && ["image", "image_refs"].includes(classifyJobModel(entry));
+  const explicit = model ? ps.models.find((m) => m.model === model && (!endpoint || m.endpoint === endpoint)) : undefined;
+  if (model && !compatible(explicit)) throw new Error("The selected image endpoint is unavailable or incompatible.");
+  const existing = shot.model || shot.endpoint ? ps.models.find((m) => m.model === shot.model && m.endpoint === shot.endpoint) : undefined;
+  if ((shot.model || shot.endpoint) && !model && !compatible(existing)) throw new Error("The stored image endpoint is unavailable or incompatible. Select a live image endpoint before rendering.");
+  if (refs.length && (!refModel || (explicit && classifyJobModel(explicit) !== "image_refs"))) {
+    throw new Error("No compatible reference-image endpoint is selected. References were not dropped.");
+  }
   if (!shot.model || !shot.endpoint || model || refModel) {
-    const def =
-      (model && ps.models.find((m) => m.model === model && (!endpoint || m.endpoint === endpoint))) ||
-      refModel ||
-      // Placeholders use the fast, lower-cost tier.
-      ps.models.find((m) => m.model === "flux-schnell" && m.endpoint === "generate") ||
-      ps.models.find((m) => m.model === "flux2-dev" && m.endpoint === "generate") ||
-      ps.models[0];
-    if (!def) {
-      ps.toast("No models available — check your key");
-      return;
-    }
+    const def = explicit || refModel || pickModel(ps.models, "image");
+    if (!compatible(def)) throw new Error("No compatible live image endpoint is available.");
     ps.setBoard(await patchShot(ps.apiKey, undefined, shot.id, { model: def.model, endpoint: def.endpoint }));
   }
   const sb = await generateShot(ps.apiKey, shot.id, refs.length && refModel ? { images: refs } : undefined);

@@ -29,6 +29,7 @@ import {
 import { boardReadiness } from "./readiness";
 import { promptPackMarkdown, shotBible, downloadText } from "./promptPack";
 import { registerActions } from "./control";
+import { modelActionAvailable } from "./modelActionAvailability";
 
 // Server pipeline is single-stage (generate → still/clip); the design's
 // draft→lowres→hires ladder maps onto it honestly:
@@ -564,6 +565,7 @@ export default function BoardView({ ps }: { ps: PS }) {
       },
       {
         name: "board.render_beat",
+        available: modelActionAvailable(ps, "image") || modelActionAvailable(ps, "image_edit") || modelActionAvailable(ps, "image_refs"),
         description: "Render one beat's still — edits its existing image when it has one. Params: { id }",
         parameters: {
           type: "object",
@@ -587,12 +589,12 @@ export default function BoardView({ ps }: { ps: PS }) {
           return { ok: true };
         },
       },
-      { name: "board.render_all", description: "Render every draft beat", confirmation: "Starts paid image generation jobs", run: () => fnsRef.current.renderAll() },
+      { name: "board.render_all", available: modelActionAvailable(ps, "image"), description: "Render every draft beat", confirmation: "Starts paid image generation jobs", run: () => fnsRef.current.renderAll() },
       { name: "board.preview", description: "Play the storyboard seed cut without exporting; Studio owns release export", run: () => fnsRef.current.previewBoard() },
       { name: "board.export_prompt_pack", description: "Download the prompt pack (.md) + shot bible (.json)", run: () => fnsRef.current.exportPack() },
     ]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [ps.models, ps.catalogAvailable]);
 
   const total = shots.reduce((s, b) => s + durOf(b), 0);
   const ready = shots.filter((s) => s.status === "ready").length;

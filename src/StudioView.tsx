@@ -5,6 +5,7 @@ import { isShotRunning, renderShot } from "./shots";
 import { assembleRelease, BEAT_SECONDS, extOf, geographyIssues, loadPipeline, pickModel, savePipeline, type Pipeline } from "./pipeline";
 import { beatReadiness } from "./readiness";
 import { registerActions } from "./control";
+import { modelActionAvailable } from "./modelActionAvailability";
 import AudioWaveform from "./AudioWaveform";
 import { consumeStudioAssets } from "./studioHandoff";
 import {
@@ -1065,8 +1066,8 @@ export default function StudioView({ ps }: { ps: PS }) {
       },
       { name: "studio.fullscreen", description: "Toggle monitor fullscreen", run: () => fnsRef.current.toggleFullscreen() },
       { name: "studio.export", description: "Export the exact Studio timeline as a release file (costs 25 credits)", confirmation: "Spends 25 credits on release assembly", run: () => fnsRef.current.exportTimeline() },
-      { name: "studio.render_drafts", description: "Render every draft storyboard beat", confirmation: "Starts paid image generation jobs", run: () => fnsRef.current.renderDrafts() },
-      { name: "studio.regenerate_selected", description: "Re-render the selected storyboard beat", confirmation: "Starts a paid image generation job", run: () => fnsRef.current.regenSel() },
+      { name: "studio.render_drafts", available: modelActionAvailable(ps, "image"), description: "Render every draft storyboard beat", confirmation: "Starts paid image generation jobs", run: () => fnsRef.current.renderDrafts() },
+      { name: "studio.regenerate_selected", available: modelActionAvailable(ps, "image") || modelActionAvailable(ps, "image_edit") || modelActionAvailable(ps, "image_refs"), description: "Re-render the selected storyboard beat", confirmation: "Starts a paid image generation job", run: () => fnsRef.current.regenSel() },
       { name: "studio.split_selected_clip", description: "Split the selected clip at the current playhead", run: () => fnsRef.current.splitSelectedClip() },
       { name: "studio.duplicate_selected_clip", description: "Duplicate the selected clip immediately after itself", run: () => fnsRef.current.duplicateSelectedClip() },
       { name: "studio.ripple_delete_selected_clip", description: "Remove the selected clip and close the resulting gap on its track", confirmation: "Removes a clip and shifts later clips on that track", run: () => fnsRef.current.rippleDeleteSelectedClip() },
@@ -1093,7 +1094,7 @@ export default function StudioView({ ps }: { ps: PS }) {
       { name: "studio.remove_selected_clip", description: "Remove the selected edit clip", confirmation: "Removes a clip from the timeline", run: () => fnsRef.current.removeSelectedClip() },
     ]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [ps.models, ps.catalogAvailable]);
 
   const normalizedAssetQuery = assetQuery.trim().toLowerCase();
   const matchingAssets = (ps.media?.objects || [])
