@@ -50,6 +50,10 @@ license notices remain authoritative. The Draco and Basis runtime decoders are
 copied from the locked Three.js package during `bun run setup` and are not tracked
 as Pioneer Studio source.
 
+The agent desktop viewer uses [noVNC](https://github.com/novnc/noVNC) 1.7.0
+(`@novnc/novnc`), licensed under MPL-2.0. It is loaded unmodified from the locked
+package; its source and license ship in that package.
+
 ## Fonts and hosted services
 
 The application requests Space Grotesk and JetBrains Mono from Google Fonts at

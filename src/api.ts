@@ -1,4 +1,6 @@
 import { walletSessionFromResponse, type WalletSession } from "./authSession";
+import type { WalletOption } from "./wallets";
+import { agentErrorDetails } from "./agentReply";
 /** Public, metered Pioneer API. Users provide their own credential at runtime. */
 export const API_BASE = "https://alpha.pioneers.dev";
 
@@ -96,6 +98,279 @@ export class ApiError extends Error {
     super(message);
     this.status = status;
     this.name = "ApiError";
+  }
+}
+
+export type HostedAgent = {
+  id: string; name: string; template: string; status: string; network: string;
+  token_budget: number; credits_paid: number; cpus: number; mem_gb: number; disk_gb: number;
+  observed_at: number | null; pending_operation_id?: string | null;
+  setup_required?: boolean; setup_state?: "not_required" | "pending" | "ready" | "blocked" | "suspended";
+  /** Runtime state from the bound repository. Absent until Alpha ships repo runs. */
+  source?: { full_name: string; commit: string | null; synced_at: number | null } | null;
+  unlocked?: boolean;
+  live: { budget_tokens: number; used_tokens: number; remaining_tokens: number; state?: string; status?: string; container?: string } | null;
+};
+export type AgentCatalog = {
+  network: string; tokens_per_credit: number | null; purchasing_enabled: boolean;
+  setup_required?: boolean;
+  /** Each flag is false until Alpha enables that route; Studio keeps the control disabled. */
+  features?: { unlock?: boolean; sync?: boolean; desktop?: boolean };
+  templates: string[]; planned_templates?: string[];
+  limits: { agents: number; cpus: number; mem_gb: number; disk_gb: number; per_agent: { cpus: number; mem_gb: number; disk_gb: number }; file_bytes: number };
+};
+export type AgentOperation = {
+  id: string; state: string; kind: string; error_code?: string | null;
+  reconciliation_required?: boolean; refunded?: number;
+};
+export type AgentOperationResult = { agent: HostedAgent; operation: AgentOperation };
+export type AgentFile = { name: string; dir: boolean; size?: number; mtime?: number };
+export type AgentUsage = { day: string; model: string; requests: number; prompt_tokens: number; completion_tokens: number };
+
+export class AgentApiError extends ApiError {
+  readonly code: string;
+  readonly retryAfter: number | null;
+  constructor(message: string, status: number, code: string, retryAfter: number | null = null) {
+    super(message, status); this.code = code; this.retryAfter = retryAfter;
+  }
+}
+
+async function checkAgentResponse(res: Response): Promise<void> {
+  if (res.ok) return;
+  const body = await res.json().catch(() => null);
+  const retry = res.headers.get("Retry-After");
+  const seconds = retry === null ? NaN : Number(retry);
+  const retryAfter = retry === null ? null : Number.isFinite(seconds) ? seconds : Math.max(0, (Date.parse(retry) - Date.now()) / 1000);
+  const failure = agentErrorDetails(body, `Agent request failed (${res.status})`, "request_failed", res.status);
+  throw new AgentApiError(failure.message, res.status, failure.code, Number.isFinite(retryAfter) ? retryAfter : null);
+}
+
+export async function agentRequest<T>(apiKey: string, suffix: string, init: RequestInit = {}): Promise<T> {
+  const res = await apiFetch(`${API_BASE}/api/v1/agents${suffix}`, {
+    ...init, headers: { ...authHeaders(apiKey), ...init.headers },
+  });
+  await checkAgentResponse(res);
+  return res.json();
+}
+
+export type AgentTurnState = { state: "idle"; turn_id?: never } | { state: "running" | "uncertain"; turn_id: string };
+const TURN_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function conversationSession(session: string): string {
+  if (typeof session !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/.test(session)) throw new Error("Invalid conversation session.");
+  return session;
+}
+function agentTurnState(value: unknown): AgentTurnState {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const v = value as Record<string, unknown>;
+    if (v.state === "idle") return { state: "idle" };
+    if ((v.state === "running" || v.state === "uncertain") && typeof v.turn_id === "string" && TURN_UUID.test(v.turn_id))
+      return { state: v.state, turn_id: v.turn_id };
+  }
+  throw new AgentApiError("Agent returned an invalid conversation state.", 502, "invalid_upstream");
+}
+
+/** Admission metadata only. Observing an outcome never resends the task. */
+export async function getAgentTurnState(apiKey: string, id: string, session: string, signal?: AbortSignal): Promise<AgentTurnState> {
+  const query = new URLSearchParams({ session: conversationSession(session) });
+  return agentTurnState(await agentRequest(apiKey, `/${encodeURIComponent(id)}/messages/state?${query}`, { signal }));
+}
+
+export async function reconcileAgentTurn(apiKey: string, id: string,
+  request: { session: string; turn_id: string; confirmed_stopped: true }, signal?: AbortSignal): Promise<AgentTurnState> {
+  const session = conversationSession(request.session);
+  if (typeof request.turn_id !== "string" || !TURN_UUID.test(request.turn_id)) throw new Error("Invalid conversation turn identity.");
+  if (request.confirmed_stopped !== true) throw new Error("Explicit stopped confirmation is required.");
+  const state = agentTurnState(await agentRequest(apiKey, `/${encodeURIComponent(id)}/messages/reconcile`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, signal,
+    body: JSON.stringify({ session, turn_id: request.turn_id, confirmed_stopped: true }),
+  }));
+  if (state.state !== "idle") throw new AgentApiError("The server did not confirm reconciliation. Review the current conversation state before trying again.", 409, "conversation_unresolved");
+  return state;
+}
+
+export function agentMutation(apiKey: string, suffix: string, method: string, body: Record<string, unknown> | null, key: string) {
+  return agentRequest<AgentOperationResult>(apiKey, suffix, {
+    method, headers: { "Content-Type": "application/json", "Idempotency-Key": key },
+    ...(body === null ? {} : { body: JSON.stringify(body) }),
+  });
+}
+
+export type AgentConnectionCapabilities = {
+  github_read: boolean; github_write: false; assets: false; configured: boolean;
+  enabled: boolean; runtime_auth: string; github_installation_url: string;
+};
+export type AgentRepository = { id: number; full_name: string };
+export type AgentInstallation = { id: number; account: string };
+export type AgentConnection = {
+  agent_id: string; revision: number; generation: number; state: string;
+  repositories: AgentRepository[]; permissions: string[]; sync_pending: boolean;
+  error_code: string | null; last_verified_at: number | null;
+  legacy: { state: string; evidence: string | null };
+  github_identity?: { id: number; login: string } | null;
+  credential_expires_at?: number | null; provider_revocation_pending?: boolean;
+};
+export type AgentAuthorization = { connection_id: string; authorization_url: string; expires_at: number };
+export type AgentConnectionMutation = {
+  path: string; method: "POST" | "PUT" | "DELETE"; body: Record<string, unknown> | null; key: string;
+};
+export function connectionMutation<T>(apiKey: string, id: string, request: AgentConnectionMutation, signal?: AbortSignal) {
+  return agentRequest<T>(apiKey, `/${encodeURIComponent(id)}/connections/${request.path}`, {
+    method: request.method, headers: { "Content-Type": "application/json", "Idempotency-Key": request.key },
+    ...(request.body === null ? {} : { body: JSON.stringify(request.body) }), signal,
+  });
+}
+export function connectionResources(apiKey: string, id: string, connectionId: string, installationId?: number, page = 1, signal?: AbortSignal) {
+  const query = new URLSearchParams({ connection_id: connectionId, page: String(page) });
+  if (installationId !== undefined) query.set("installation_id", String(installationId));
+  return agentRequest<{ installations?: AgentInstallation[]; repositories?: AgentRepository[]; next_page: number | null }>(
+    apiKey, `/${encodeURIComponent(id)}/connections/github/resources?${query}`, { signal });
+}
+
+/** Sends the dotenvx key to the agent's runtime memory. Alpha forwards it without storing or logging it. */
+export async function unlockAgent(apiKey: string, id: string, key: string, signal?: AbortSignal) {
+  const result = await agentRequest<{ unlocked: boolean }>(apiKey, `/${encodeURIComponent(id)}/unlock`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key }), signal,
+  });
+  if (result?.unlocked !== true) throw new AgentApiError("The runtime did not confirm unlocked configuration. Check its status before trying again.", 502, "unlock_not_confirmed");
+  return result;
+}
+
+export function openAgentDesktop(apiKey: string, id: string, signal?: AbortSignal) {
+  return agentRequest<{ websocket_url: string; ticket: string; expires_at: number }>(apiKey, `/${encodeURIComponent(id)}/desktop/session`, { method: "POST", signal });
+}
+
+export function validateAgentPath(path: string, allowRoot = false): string {
+  if ((!path && !allowRoot) || path.startsWith("/") || /[\\\\%]/.test(path) || Array.from(path).some((c) => c.charCodeAt(0) < 32) ||
+      (path && path.split("/").some((p) => !p || p === "." || p === ".."))) {
+    throw new Error("Use a relative workspace path without traversal or encoded fragments.");
+  }
+  return path;
+}
+
+export type AgentFileArea = "workspace" | "projects";
+const AGENT_FILE_BYTES = 10 * 1024 * 1024;
+function agentFileQuery(path: string, area: AgentFileArea, download = false): URLSearchParams {
+  if (area !== "workspace" && area !== "projects") throw new Error("Use the workspace or projects file area.");
+  const query = new URLSearchParams({ path: validateAgentPath(path) });
+  if (download) query.set("download", "true");
+  if (area !== "workspace") query.set("area", area);
+  return query;
+}
+
+export async function readAgentFile(apiKey: string, id: string, path: string, signal?: AbortSignal, area: AgentFileArea = "workspace"): Promise<string> {
+  const query = agentFileQuery(path, area, true);
+  const res = await apiFetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(id)}/files?${query}`, { headers: authHeaders(apiKey), signal });
+  await checkAgentResponse(res);
+  return res.text();
+}
+
+/** Artifact downloads must preserve binary bytes and bound the actual transfer. */
+export async function downloadAgentFile(apiKey: string, id: string, path: string, signal?: AbortSignal, area: AgentFileArea = "workspace"): Promise<Blob> {
+  const query = agentFileQuery(path, area, true);
+  const res = await apiFetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(id)}/files?${query}`, { headers: authHeaders(apiKey), signal });
+  await checkAgentResponse(res);
+  if (Number(res.headers.get("Content-Length")) > AGENT_FILE_BYTES) {
+    void res.body?.cancel().catch(() => {});
+    throw new Error("File exceeds 10 MiB.");
+  }
+  if (!res.body) return new Blob([], { type: res.headers.get("Content-Type") || "application/octet-stream" });
+  const reader = res.body.getReader();
+  const parts: BlobPart[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > AGENT_FILE_BYTES) throw new Error("File exceeds 10 MiB.");
+      parts.push(new Uint8Array(value));
+    }
+    return new Blob(parts, { type: res.headers.get("Content-Type") || "application/octet-stream" });
+  } finally { void reader.cancel().catch(() => {}); reader.releaseLock(); }
+}
+
+export async function writeAgentFile(apiKey: string, id: string, path: string, content: string, signal?: AbortSignal, area: AgentFileArea = "workspace") {
+  if (new TextEncoder().encode(content).length > AGENT_FILE_BYTES) throw new Error("File exceeds 10 MiB.");
+  return agentRequest<{ written: boolean }>(apiKey, `/${encodeURIComponent(id)}/files?${agentFileQuery(path, area)}`, {
+    method: "PUT", headers: { "Content-Type": "text/plain; charset=utf-8" }, body: content, signal,
+  });
+}
+
+function waitForAgentTask<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    work.then((value) => { signal.removeEventListener("abort", abort); resolve(value); },
+      (error) => { signal.removeEventListener("abort", abort); reject(error); });
+  });
+}
+
+/** No task replay: an interrupted stream may already have performed work. */
+export async function streamAgentMessage(apiKey: string, id: string, content: string, session: string,
+  onText: (text: string, mode?: "append" | "replace") => void, signal?: AbortSignal): Promise<void> {
+  // The service may spend 900 seconds on tool work. Keep one overall deadline,
+  // with transport grace; heartbeat comments neither end nor replay the turn.
+  const task = new AbortController();
+  const cancel = () => task.abort(signal?.reason);
+  if (signal?.aborted) cancel(); else signal?.addEventListener("abort", cancel, { once: true });
+  let timedOut = false;
+  const deadline = setTimeout(() => {
+    if (task.signal.aborted) return;
+    timedOut = true; task.abort(new Error("Agent task deadline exceeded"));
+  }, 930_000);
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    task.signal.throwIfAborted();
+    const res = await waitForAgentTask(apiFetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(id)}/messages`, {
+      method: "POST", headers: { ...authHeaders(apiKey), "Content-Type": "application/json" },
+      body: JSON.stringify({ content, session, stream: true }), signal: task.signal,
+    }), task.signal);
+    await waitForAgentTask(checkAgentResponse(res), task.signal);
+    if (!res.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) {
+      const body = await waitForAgentTask(res.json(), task.signal);
+      const reply = body?.choices?.[0]?.message?.content;
+      if (typeof reply !== "string") throw new Error("Agent returned an invalid reply.");
+      onText(reply, "replace"); return;
+    }
+    if (!res.body) throw new Error("Agent stream has no body.");
+    reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await waitForAgentTask(reader.read(), task.signal);
+      buffer += decoder.decode(value, { stream: !done });
+      let boundary: RegExpExecArray | null;
+      while ((boundary = /\r?\n\r?\n/.exec(buffer))) {
+        const event = buffer.slice(0, boundary.index);
+        buffer = buffer.slice(boundary.index + boundary[0].length);
+        const lines = event.split(/\r?\n/);
+        const data = lines.filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
+        const errorEvent = lines.some((line) => /^event:\s*error\s*$/.test(line));
+        if (errorEvent && (!data || data === "[DONE]")) throw new AgentApiError("Agent stream failed. Check progress before sending again.", 502, "stream_error");
+        if (!data) continue;
+        if (data === "[DONE]") return;
+        let payload;
+        try { payload = JSON.parse(data); }
+        catch { throw new AgentApiError("Agent stream returned invalid data. Check progress before sending again.", 502, "invalid_stream"); }
+        if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new AgentApiError("Agent stream returned invalid data. Check progress before sending again.", 502, "invalid_stream");
+        if (errorEvent || payload.error != null || payload.detail != null) {
+          const failure = agentErrorDetails(payload, "Agent stream failed", "stream_error", 502);
+          throw new AgentApiError(failure.message, failure.status, failure.code);
+        }
+        const final = payload.choices?.[0]?.message?.content;
+        const text = payload.choices?.[0]?.delta?.content;
+        if (typeof final === "string") onText(final, "replace");
+        else if (typeof text === "string") onText(text, "append");
+      }
+      if (done) throw new Error("Stream interrupted; the task may still be running. Check progress before sending again.");
+    }
+  } catch (error) {
+    if (timedOut) throw new AgentApiError("Agent response timed out; the task may still be running. Check workspace files, status and logs before sending again.", 504, "task_timeout");
+    throw error;
+  } finally {
+    clearTimeout(deadline); signal?.removeEventListener("abort", cancel);
+    if (reader) { void reader.cancel().catch(() => {}); reader.releaseLock(); }
   }
 }
 
@@ -259,6 +534,7 @@ export function primeMetaMaskSession(): void {
 // message format is part of the public API contract and must remain stable.
 export async function connectWallet(options: {
   choice?: WalletChoice;
+  wallet?: WalletOption;
   signal?: AbortSignal;
   onProgress?: (progress: WalletProgress) => void;
   onAccount?: (account: { address: string; provider: string }) => void;
@@ -267,17 +543,17 @@ export async function connectWallet(options: {
   const cancelled = () => signal?.throwIfAborted();
   cancelled();
   onProgress?.("connecting");
-  const injected = injectedProvider(options.choice);
-  if (!injected && options.choice === "keepkey") {
+  const injected = options.wallet ? options.wallet.provider : injectedProvider(options.choice);
+  if (!injected && (options.wallet ? options.wallet.kind === "keepkey" : options.choice === "keepkey")) {
     throw new Error("KeepKey extension not found. Open the KeepKey extension, then retry.");
   }
-  if (!injected && !needsMetaMaskHandoff()) {
+  if (!injected && options.wallet?.kind !== "metamask" && !needsMetaMaskHandoff()) {
     throw new Error("No browser wallet found. Open your wallet extension, or sign in with a Pioneer key.");
   }
   // Keep this provider for the entire challenge, even if another extension injects later.
   const eth = injected ?? (await metaMaskSession());
   cancelled();
-  const providerName = eth === injectedProvider("keepkey") ? "KeepKey" : injected ? "Browser wallet" : "MetaMask";
+  const providerName = options.wallet?.name || (eth === injectedProvider("keepkey") ? "KeepKey" : injected ? "Browser wallet" : "MetaMask");
   const accounts: unknown = await eth.request({ method: "eth_requestAccounts" });
   cancelled();
   const address = Array.isArray(accounts) ? accounts[0] : null;

@@ -110,7 +110,7 @@ function Wave({ on }: { on: boolean }) {
   );
 }
 
-export default function ChatView({ ps }: { ps: PS }) {
+export default function ChatView({ ps, active = true }: { ps: PS; active?: boolean }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [text, setText] = useState("");
   const [dropping, setDropping] = useState(false);
@@ -384,6 +384,7 @@ export default function ChatView({ ps }: { ps: PS }) {
   // Media handed over from the Media table: show it, and put its name in the
   // composer so the planner wires it in as a ref on the next thing you ask for.
   useEffect(() => {
+    if (!active) return;
     const handed = consumeChatMedia();
     if (!handed) return;
     const turn = addTurn("ai", [
@@ -397,7 +398,7 @@ export default function ChatView({ ps }: { ps: PS }) {
     setText(`Using ${handed.name}, `);
     box.current?.focus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [active]);
 
   useEffect(() => {
     ps.registerSuggestions("chat", [

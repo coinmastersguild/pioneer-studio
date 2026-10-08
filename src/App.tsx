@@ -1,4 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { WORKSPACE_GROUPS } from "./studioNavigation";
+import { dispatchWorkspaceInput } from "./workspaceInput";
+import { connectionReturn } from "./agentConnectionState";
+import type { WalletOption } from "./wallets";
 import "./shell.css";
 import "./chat.css";
 import "./board.css";
@@ -31,20 +35,14 @@ import {
 } from "./api";
 import {
   GB,
-  IcAnimate,
-  IcBoard,
   IcCreate,
   IcChat,
   IcFolder,
-  IcHead,
   IcImage,
-  IcModels,
-  IcScript,
   IcSend,
   IcSettings,
   IcSpark,
   IcStudio,
-  IcUsers,
   sleep,
   type Mode,
   type PS,
@@ -56,6 +54,7 @@ import { clearWalletSession, rememberWalletPreference, restoreWalletSession, sav
 import { createGenerationAction } from "./generationJob";
 import { sendCharacter } from "./characterHandoff";
 import ChatView from "./ChatView";
+import AgentChatView from "./AgentChatView";
 import BoardView from "./BoardView";
 import ScriptView from "./ScriptView";
 import StudioView from "./StudioView";
@@ -84,7 +83,7 @@ type ThreadItem = { id: number; kind: "user" | "ai"; text: string };
 type Toast = { id: number; msg: string; kind?: "ok" | "gold"; out?: boolean };
 type PendingAgentTurn = { turn: StudioAgentTurn; completed: StudioActionResult[]; actions: PreparedStudioAction[] };
 
-const MODE_LABEL: Record<Mode, string> = { chat: "chat", board: "storyboard", script: "script", create: "create", animate: "animation", head: "talking head", studio: "studio", media: "media", models: "models", projects: "projects", companies: "companies", settings: "settings" };
+const MODE_LABEL: Record<Mode, string> = { chat: "chat", agents: "agents", board: "storyboard", script: "script", create: "create", animate: "animation", head: "talking head", studio: "studio", media: "media", models: "models", projects: "projects", companies: "companies", settings: "settings" };
 function App() {
   // Dev-only credential seed. Without it an agent driving the /mcp
   // bridge can never authenticate — every board/studio action needs a key, and
@@ -106,7 +105,8 @@ function App() {
   const authAttempt = useRef<AbortController | null>(null);
   const rememberRef = useRef(remember);
   rememberRef.current = remember;
-  const [mode, setMode] = useState<Mode>("chat");
+  const [mode, setMode] = useState<Mode>(() => connectionReturn(window.location.href) ? "agents" : "chat");
+  const [navGroup, setNavGroup] = useState<string | null>(null);
   const [models, setModels] = useState<JobModel[]>([]);
   const [catalogRevision, setCatalogRevision] = useState<string | null>(null);
   const [catalogAvailable, setCatalogAvailable] = useState(false);
@@ -127,6 +127,7 @@ function App() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [suggestions, setSuggestions] = useState<Record<Mode, Suggestion[]>>({
     chat: [],
+    agents: [],
     board: [],
     script: [],
     create: [],
@@ -349,7 +350,7 @@ function App() {
     setPendingAgent(null);
     agentHistoryRef.current = [];
     setThread([]);
-    setSuggestions({ chat: [], board: [], script: [], create: [], animate: [], head: [], studio: [], media: [], models: [], projects: [], companies: [], settings: [] });
+    setSuggestions({ chat: [], agents: [], board: [], script: [], create: [], animate: [], head: [], studio: [], media: [], models: [], projects: [], companies: [], settings: [] });
   }
 
   function acceptCredential(key: string, session: WalletSession | null) {
@@ -381,7 +382,7 @@ function App() {
       : message;
   }
 
-  async function onConnectWallet(choice: WalletChoice = "auto") {
+  async function onConnectWallet(choice: WalletChoice = "auto", wallet?: WalletOption) {
     if (authAttempt.current) return;
     const attempt = new AbortController();
     authAttempt.current = attempt;
@@ -389,7 +390,7 @@ function App() {
     setAuthDetail("");
     try {
       const session = await connectWallet({
-        choice,
+        choice, wallet,
         signal: attempt.signal,
         onProgress: (phase) => {
           if (authAttempt.current === attempt) setAuthProgress({ connecting: "Connecting to wallet…", signing: "Confirm sign-in in your wallet…", verifying: "Verifying wallet sign-in…" }[phase]);
@@ -631,9 +632,11 @@ function App() {
     const key = apiKeyRef.current;
     const epoch = accountEpochRef.current;
     setChatText("");
-    // ChatView is still the generation planner. Everywhere else the rail is a
-    // real tool-calling copilot over the shared action registry.
-    if (mode === "chat") return inputHandlers.current.chat?.(v);
+    const routed = dispatchWorkspaceInput(mode, v, inputHandlers.current);
+    if (routed !== "copilot") {
+      if (routed === "unavailable") toast("This workspace is not ready yet. Reopen it and try again.");
+      return;
+    }
     addMsg("You", v);
     busyRef.current = true;
     setAiStateRaw({ label: "planning", working: true });
@@ -692,15 +695,8 @@ function App() {
 
   const modeBtns: { m: Mode; label: string; icon: () => React.ReactNode }[] = [
     { m: "chat", label: "Chat", icon: IcChat },
-    { m: "board", label: "Storyboard", icon: IcBoard },
-    { m: "script", label: "Script", icon: IcScript },
-    { m: "create", label: "Create", icon: IcCreate },
-    // Head sits before Animation: you design and cast a character (Create),
-    // give it a voice and face (Head), then stage and move it (Animation).
-    // Left-to-right is the order of the work.
-    { m: "head", label: "Head", icon: IcHead },
-    { m: "animate", label: "Animation", icon: IcAnimate },
-    { m: "studio", label: "Studio", icon: IcStudio },
+    { m: "agents", label: "Agents", icon: IcSpark },
+    { m: "studio", label: "Edit", icon: IcStudio },
   ];
 
   const signIn = {
@@ -722,7 +718,8 @@ function App() {
           <div className="brand">
             <img src="/compass-icon.svg" alt="" /> Pioneer <span className="sub">Studio</span>
           </div>
-          <p className="gate-lede">Storyboards, 3D cutscenes and talking characters, rendered on Pioneer's GPUs.</p>
+          <p className="gate-lede">Talk through ideas, run your agents, and finish scenes and videos in one studio.</p>
+          {connectionReturn(window.location.href) && <p role="status">GitHub returned to Studio. Go back to your original signed-in Studio tab and choose “Load my repositories” to finish setup. If you closed that tab, reconnect below.</p>}
           <SignInForm {...signIn} />
           <p className="gate-note">
             No key? Mint one at <b>alpha.pioneers.dev/keys</b>.
@@ -790,41 +787,47 @@ function App() {
       </div>
 
       {/* LEFT RAIL */}
-      <div className="rail" id="rail">
+      <nav className="rail" id="rail" aria-label="Studio workspaces">
         {modeBtns.map(({ m, label, icon: Icon }) => (
-          <div key={m} className={`rail-btn${mode === m ? " active" : ""}`} data-mode={m} onClick={() => setMode(m)}>
+          <button type="button" aria-label={label} aria-current={mode === m ? "page" : undefined} key={m} className={`rail-btn${mode === m ? " active" : ""}`} data-mode={m} onClick={() => setMode(m)}>
             <Icon />
             <span className="rb-label">{label}</span>
-          </div>
+          </button>
         ))}
         <div className="rail-sep" />
-        <div className={`rail-btn${mode === "media" ? " active" : ""}`} data-mode="media" onClick={() => setMode("media")}>
-          <IcImage />
-          <span className="rb-label">Media{mediaCount ? ` · ${mediaCount}` : ""}</span>
-        </div>
-        <div className={`rail-btn${mode === "models" ? " active" : ""}`} data-mode="models" onClick={() => setMode("models")}>
-          <IcModels />
-          <span className="rb-label">Models{models.length ? ` · ${models.length}` : ""}</span>
-        </div>
-        <div className={`rail-btn${mode === "projects" ? " active" : ""}`} data-mode="projects" onClick={() => setMode("projects")}>
-          <IcFolder />
-          <span className="rb-label">Projects</span>
-        </div>
-        <div className={`rail-btn${mode === "companies" ? " active" : ""}`} data-mode="companies" onClick={() => setMode("companies")}>
-          <IcUsers />
-          <span className="rb-label">Companies</span>
-        </div>
+        {WORKSPACE_GROUPS.map((group) => {
+          const current = group.modes.find((item) => item.mode === mode);
+          const Icon = group.label === "Plan" ? IcFolder : group.label === "Create" ? IcCreate : IcImage;
+          return <div className="rail-group" key={group.label}>
+            <button type="button" className={`rail-btn${current ? " active" : ""}`} aria-label={group.label}
+              aria-expanded={navGroup === group.label} aria-controls={`nav-${group.label}`}
+              onClick={() => setNavGroup(navGroup === group.label ? null : group.label)}>
+              <Icon /><span className="rb-label">{current?.label || group.label} ▾</span>
+            </button>
+            {navGroup === group.label && <>
+              <button className="nav-dismiss" aria-label="Close workspace menu" onClick={() => setNavGroup(null)} />
+              <div className="rail-menu" id={`nav-${group.label}`} onKeyDown={(event) => { if (event.key === "Escape") { setNavGroup(null); event.currentTarget.parentElement?.querySelector("button")?.focus(); } }}>
+                <strong>{group.label}</strong>
+                {group.modes.map((item) => <button type="button" key={item.mode} aria-current={item.mode === mode ? "page" : undefined}
+                  onClick={() => { setMode(item.mode); setNavGroup(null); }}>{item.label}</button>)}
+              </div>
+            </>}
+          </div>;
+        })}
         <div className="grow" />
-        <div className={`rail-btn${mode === "settings" ? " active" : ""}`} data-mode="settings" onClick={() => setMode("settings")}>
+        <button type="button" aria-label="Settings" aria-current={mode === "settings" ? "page" : undefined} className={`rail-btn${mode === "settings" ? " active" : ""}`} data-mode="settings" onClick={() => setMode("settings")}>
           <IcSettings />
           <span className="rb-label">Settings</span>
-        </div>
-      </div>
+        </button>
+      </nav>
 
       {/* WORK AREA — all views stay mounted so jobs keep polling across modes */}
       <div className="work" key={accountEpoch}>
         <div className={`view${mode === "chat" ? " active" : ""}`} id="view-chat">
-          <ChatView ps={ps} />
+          <ChatView ps={ps} active={mode === "chat"} />
+        </div>
+        <div className={`view${mode === "agents" ? " active" : ""}`} id="view-agents">
+          <AgentChatView ps={ps} active={mode === "agents"} />
         </div>
         <div className={`view${mode === "board" ? " active" : ""}`} id="view-board">
           <BoardView ps={ps} />

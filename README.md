@@ -10,6 +10,15 @@ client is free software; generation runs through the paid, metered Pioneer API.
 
 ## What it does
 
+- Run persistent OpenHuman agents with prepaid alpha testnet credits through the
+  Agents workspace. Claim agents, confirm tasks and top-ups, edit workspace files,
+  and monitor status, usage, logs, and network activity.
+- Create one personal repository from the public
+  [agent template](https://github.com/coinmastersguild/agent-template), author its
+  `agent/` files locally, and connect that single repository through Alpha's
+  GitHub App. Agents receive read-only access to their repository.
+- Unlock encrypted configuration, pull committed updates, and open the agent's
+  full live desktop in Studio when Alpha advertises those capabilities.
 - Turn a prompt into an image, video, audio, or 3D generation job.
 - Build a cast-first storyboard and carry approved assets across shots.
 - Create characters, voices, talking heads, and VRM actors.
@@ -34,7 +43,89 @@ Pioneer API key. Remember me is on by default for wallet sign-in, keeping the
 wallet session on this device until its server expiry. Uncheck it to keep the
 session in the current tab only. Sign-out clears cached wallet sessions. Pasted
 API keys stay in page memory and are discarded on reload; no credentials are
-bundled with the application.
+bundled with the application. Choose MetaMask, KeepKey, or another discovered
+browser wallet explicitly. KeepKey requires its extension and desktop app.
+
+Agent chat supports `/claim` (or `/new`), `/pair`, `/status`, `/files`, `/edit AGENTS.md`, `/github`,
+`/credentials`, `/logs`, `/usage`, `/egress`, `/topup`, `/suspend`, `/resume`, and
+`/delete`. Purchases retain their exact request and idempotency key locally for
+recovery; those records contain no credentials or workspace contents. Mainnet
+purchases and Agent Zero are unavailable. Conversation and media job planning remain in Chat. Agent commands live in
+Agents. Saved Media assets can be returned to Chat from the deliverables panel;
+workspace files require an explicit save or upload before they appear in Media.
+
+`/pair`, `/github`, and `/credentials` open GitHub connection management in chat.
+When Alpha enables connections, users authorize the GitHub App, declare legacy
+credential status, select one personal repository created from the template,
+confirm read access, and monitor runtime
+verification or revoke the binding. Credentials are managed by Alpha and Beast;
+Studio never copies its sign-in credential or manual tokens into the runtime.
+Previously supplied credentials must be revoked at their issuers; deleting their
+files or revoking a new binding does not invalidate them. GitHub writes, approvals
+and Pioneer asset delegation are unavailable in this first connection milestone.
+
+Author and test the repository locally, then push your changes using your own
+GitHub account. **Pull & restart** accepts a pinned commit and retains its original
+request key across navigation or sign-in, so retrying an uncertain result does
+not restart twice. Repository files replace their deployed copies; files created
+only by the agent remain in its workspace.
+
+**Unlock** accepts the key from `make key` in your repository. Studio clears the
+field after every attempt; Alpha forwards the key without storing it. The trusted
+runtime keeps it in memory, and restarting the tenant locks the agent again.
+Pull & restart retains the in-memory key.
+
+**Desktop** draws a continuous VNC framebuffer stream with noVNC, including the
+agent's visible browser and installed desktop applications. Use **Full screen**,
+**Reconnect**, or **Close** in the viewer. Alpha issues a single-use connection
+ticket for that agent; the ticket never appears in the URL, and no agent-hosted
+page runs in Studio's origin. If its inference budget is exhausted, an observed
+running desktop remains viewable; tasks still require a top-up.
+Use **Clipboard** to paste text into its field and explicitly **Send to desktop**,
+then press Ctrl+V in the desktop. Text copied inside the desktop can be copied
+back with **Copy from desktop**. Transfers are limited to 16 KiB, kept in the
+open viewer's memory, and cleared on reconnect, disconnect or close. Studio
+never reads your browser clipboard automatically.
+
+The hosted runtime uses the public
+[Pioneer OpenHuman fork](https://github.com/coinmastersguild/openhuman).
+Runtime contributions and pull requests target that fork only; never submit them
+to upstream. Hosted project access remains read-only, and autonomous runtime PR
+submission is not offered.
+
+New Studio claims require GitHub setup: authorization, repository selection and
+verified runtime read access. Claims are paused while Alpha's GitHub capability
+is unavailable. Setup opens after claiming; tasks stay locked until verified.
+The **Agent files** panel separates persistent project files from runtime workspace
+artifacts. Download images, Blender scenes and other binary files directly; chat
+replies do not export screenshot attachments. The text editor rejects binary data
+and is limited to 1 MiB. The **Memory** panel reports host-managed availability
+and recent operation metadata, with confirmed pause/resume controls. Pausing does
+not erase facts, and memory computation is not included in displayed inference
+token usage. Fact browsing, export and deletion are unavailable.
+
+An encrypted configuration lock does not disable local browser, file or Blender
+tools. Host memory additionally requires both configuration and an enabled policy.
+Conversation IDs remain stable per agent in the signed-in tab. Use **New
+conversation** to start a fresh thread while retaining saved files and host memory.
+Tool work may take up to 15 minutes, and the reply arrives as completed content;
+chat is not an incremental token or tool-event feed. Watch the desktop or logs
+while waiting. If a reply is
+interrupted, review status, files and logs and explicitly confirm that review
+before continuing. Studio checks the server turn state and will not clear a
+running turn. An uncertain turn requires an explicit confirmation that it has
+stopped; elapsed time alone does not allow another task in that conversation.
+Studio never replays a non-idempotent task automatically.
+Runtime replacement closes a desktop from the previous observed generation;
+open a new session after readiness settles.
+
+Studio uses Alpha's durable `setup_required` and `setup_state` response metadata
+across browsers. Older responses fall back to public setup IDs stored under the
+verified owner/network. New claims also wait for Alpha's mandatory setup policy
+to be enabled. Existing agents explicitly grandfathered by Alpha remain usable.
+Use **Refresh agents** or `/status` to reload the signed-in owner's agent list.
+An uncertain purchase response does not mean an agent disappeared: check the saved
+operation or retry its original request rather than starting another purchase.
 
 `bun run setup` verifies the bundled GNM head and copies the Draco/KTX2 runtime
 decoders from the locked `three` dependency. The normal dev, test, and build

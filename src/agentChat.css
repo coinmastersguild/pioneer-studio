@@ -1,0 +1,35 @@
+.agent-chat { display:flex; flex-direction:column; height:100%; min-height:0; padding:24px; gap:14px; max-width:1100px; margin:auto; width:100%; box-sizing:border-box; }
+.agent-header,.agent-toolbar,.agent-composer>div { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+.agent-header h2 { margin:5px 0; font-size:26px; }.agent-header p { margin:0; color:var(--fg3); }
+.agent-toolbar { justify-content:flex-start; font-size:12px; color:var(--fg3); }
+.agent-chat input,.agent-chat select,.agent-chat textarea { background:var(--bg-accent); color:var(--fg1); border:1px solid var(--border-strong); border-radius:8px; padding:10px; font:inherit; box-sizing:border-box; }
+.agent-budget { display:flex; gap:10px; align-items:center; flex-wrap:wrap; font-size:12px; }.agent-budget progress { accent-color:var(--accent); max-width:200px; }.agent-budget small { color:var(--fg3); }
+.agent-transcript { flex:1; min-height:0; overflow:auto; padding:6px; }.agent-welcome { max-width:680px; margin:30px auto; color:var(--fg3); line-height:1.7; }.agent-welcome h3 { color:var(--fg1); font-size:22px; }
+.agent-shortcuts { display:flex; gap:8px; flex-wrap:wrap; }.agent-entry,.agent-card { border:1px solid var(--border-strong); border-radius:12px; padding:16px; margin:12px 0; background:var(--bg-accent); }.agent-entry.user { margin-left:12%; }.agent-entry small { color:var(--accent); }
+.agent-chat pre { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; line-height:1.6; }.agent-card label { display:block; margin:12px 0; font-size:12px; }.agent-card label input,.agent-card textarea { display:block; width:100%; margin-top:6px; }.agent-card p { color:var(--fg3); line-height:1.6; font-size:12px; }.agent-confirm { border-color:var(--accent); }.agent-error { color:#eaa59b; }
+.agent-composer { border:1px solid var(--border-strong); border-radius:12px; padding:12px; }.agent-composer textarea { width:100%; resize:vertical; border:none; }.agent-composer small { color:var(--fg3); }
+@media(max-width:700px) { .agent-chat { padding:12px; }.agent-header h2 { font-size:21px; }.agent-entry.user { margin-left:4%; } }
+.agent-connections { overflow-wrap:anywhere; }
+.agent-connections label input[type="radio"] { display:inline-block; width:auto; margin:0 8px 0 0; }
+.agent-connections select { max-width:100%; }
+.agent-connections .btn { margin:4px 6px 4px 0; }
+.agent-list-status { font-size:12px; color:var(--fg3); }
+.agent-list-status p { margin:4px 0; }
+.agent-setup { margin:0; }
+.agent-desktop { position:fixed; inset:0; z-index:50; display:flex; flex-direction:column; background:#000; }
+.agent-desktop-bar { display:flex; align-items:center; gap:12px; padding:6px 12px; background:var(--bg-accent); border-bottom:1px solid var(--border-strong); font-size:12px; color:var(--fg3); }
+.agent-desktop-bar strong { color:var(--fg1); }
+.agent-desktop-actions { margin-left:auto; display:flex; gap:6px; }
+.agent-desktop-screen { flex:1; min-height:0; width:100%; background:#000; }
+.agent-desktop-clipboard { display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:12px; background:var(--bg-accent); color:var(--fg1); max-height:45vh; overflow:auto; flex-shrink:0; }
+.agent-desktop-clipboard label { display:block; font-size:12px; }
+.agent-desktop-clipboard textarea { display:block; width:100%; margin:6px 0; padding:8px; resize:vertical; color:var(--fg1); background:var(--bg); border:1px solid var(--border-strong); box-sizing:border-box; }
+.agent-desktop-clipboard p { grid-column:1 / -1; margin:0; font-size:12px; color:var(--fg3); }
+@media(max-width:700px) { .agent-desktop-bar > [role="status"] { display:none; } }
+@media(max-width:700px) { .agent-desktop-clipboard { grid-template-columns:1fr; } }
+
+.agent-chat { overflow:auto; }
+.agent-transcript { flex:1 0 220px; }
+.agent-composer { flex-shrink:0; }
+
+.agent-file-list { list-style:none; padding:0; }.agent-file-list li { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:6px 0; }.agent-file-list li span { flex:1; overflow-wrap:anywhere; }.agent-file-navigation { display:flex; gap:6px; flex-wrap:wrap; }

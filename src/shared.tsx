@@ -1,7 +1,7 @@
 // Shared bits between the shell and the four views.
 import type { JobModel, JobStatus, MediaList, Storyboard } from "./api";
 
-export type Mode = "chat" | "board" | "script" | "create" | "animate" | "head" | "studio" | "media" | "models" | "projects" | "companies" | "settings";
+export type Mode = "chat" | "agents" | "board" | "script" | "create" | "animate" | "head" | "studio" | "media" | "models" | "projects" | "companies" | "settings";
 
 export type Suggestion = { label: string; run: () => void };
 
