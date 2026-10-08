@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { AgentApiError, agentRequest, streamAgentMessage, unlockAgent } from "./api";
+import { AgentApiError, agentRequest, getAgentTurnState, reconcileAgentTurn, streamAgentMessage, unlockAgent } from "./api";
 import { agentReplyPlaceholder, observeAgentReply, type AgentReplyState } from "./agentReply";
 
 const originalFetch = globalThis.fetch;
@@ -182,4 +182,49 @@ test("unlock success requires the runtime's explicit unlocked true acknowledgmen
     await expect(unlockAgent("fixture-owner", id, "fixture-unlock-key")).rejects.toThrow("did not confirm");
   }
   expect(calls).toBe(5);
+});
+
+test("conversation observation is owner-authenticated metadata and validates active turn identities", async () => {
+  let calls = 0;
+  globalThis.fetch = (async (input, init) => {
+    calls++;
+    const url = new URL(String(input));
+    expect(url.pathname).toBe(`/api/v1/agents/${id}/messages/state`);
+    expect(url.searchParams.get("session")).toBe("stable.conversation:-1");
+    expect(url.search).not.toContain("fixture-owner");
+    expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer fixture-owner");
+    return Response.json({ state: "uncertain", turn_id: id, message: "private-fixture-content", lease_until: 123 });
+  }) as typeof fetch;
+  expect(await getAgentTurnState("fixture-owner", id, "stable.conversation:-1")).toEqual({ state: "uncertain", turn_id: id });
+  expect(calls).toBe(1);
+  for (const body of [{ state: "running" }, { state: "uncertain", turn_id: "invalid" }, { state: "finished" }, null]) {
+    globalThis.fetch = (async () => Response.json(body)) as typeof fetch;
+    await expect(getAgentTurnState("fixture-owner", id, "session")).rejects.toThrow("invalid conversation state");
+  }
+});
+
+test("reconciliation sends only the exact stopped attestation and requires an idle acknowledgment", async () => {
+  let calls = 0;
+  globalThis.fetch = (async (input, init) => {
+    calls++;
+    expect(new URL(String(input)).pathname).toBe(`/api/v1/agents/${id}/messages/reconcile`);
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({ session: "stable-conversation", turn_id: id, confirmed_stopped: true });
+    expect(new Headers(init?.headers).has("Idempotency-Key")).toBe(false);
+    return Response.json({ state: "idle" });
+  }) as typeof fetch;
+  expect(await reconcileAgentTurn("fixture-owner", id, { session: "stable-conversation", turn_id: id, confirmed_stopped: true })).toEqual({ state: "idle" });
+  globalThis.fetch = (async () => { calls++; return Response.json({ state: "uncertain", turn_id: id }); }) as typeof fetch;
+  await expect(reconcileAgentTurn("fixture-owner", id, { session: "stable-conversation", turn_id: id, confirmed_stopped: true })).rejects.toThrow("did not confirm reconciliation");
+  expect(calls).toBe(2);
+});
+
+test("invalid sessions or stopped attestations never contact the conversation API", async () => {
+  let calls = 0;
+  globalThis.fetch = (async () => { calls++; return Response.json({ state: "idle" }); }) as typeof fetch;
+  for (const session of ["", "a".repeat(129), "session/other", "line\nbreak"])
+    await expect(getAgentTurnState("fixture-owner", id, session)).rejects.toThrow("conversation session");
+  await expect(reconcileAgentTurn("fixture-owner", id, { session: "valid", turn_id: "invalid", confirmed_stopped: true })).rejects.toThrow("turn identity");
+  await expect(reconcileAgentTurn("fixture-owner", id, { session: "valid", turn_id: id, confirmed_stopped: false as unknown as true })).rejects.toThrow("stopped confirmation");
+  expect(calls).toBe(0);
 });
