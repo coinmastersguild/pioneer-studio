@@ -22,7 +22,7 @@ async function mounted(options: { interrupted?: boolean; agents?: boolean; model
   const requests: { url: URL; method: string; body: any; authorization: string | null }[] = [];
   const handlers: Partial<Record<Mode, (text: string) => void>> = {};
   const modes: Mode[] = [];
-  let outputPrefix = ""; let generationWorking = false; let finishReply: (() => void) | undefined;
+  let outputPrefix = ""; let generationWorking = false; let detailReads = 0; let finishReply: (() => void) | undefined;
   const agent = { id: agentId, name: "Synthetic owner agent", template: "openhuman", status: "running", network: "testnet", token_budget: 10000, credits_paid: 1, cpus: 4, mem_gb: 8, disk_gb: 50, observed_at: Date.now(), setup_required: true, setup_state: "ready", unlocked: false, live: { budget_tokens: 10000, used_tokens: 0, remaining_tokens: 10000, state: "running", status: "active", container: "running" } };
   globalThis.fetch = (async (input, init = {}) => {
     const url = new URL(String(input));
@@ -33,8 +33,8 @@ async function mounted(options: { interrupted?: boolean; agents?: boolean; model
     if (path === "/api/v1/agents") return Response.json({ agents: options.agents === false ? [] : options.multiple ? [agent, { ...agent, id: otherId, name: "Second owner agent" }] : [agent], live_available: true });
     if (path === "/api/v1/agents/catalog") return Response.json(catalog);
     if (path === "/api/v1/agents/connections/capabilities") return Response.json({ github_read: true, github_write: false, assets: false, configured: true, enabled: true });
-    if (path === `/api/v1/agents/${agentId}`) return Response.json({ agent: options.suspendedAdmission ? { ...agent, status: "suspended" } : agent, pending_operation_id: null });
-    if (path.endsWith("/connections")) return Response.json({ agent_id: agentId, revision: 1, generation: 1, state: "active", repositories: [{ id: 101, full_name: "fixture/own-agent" }], permissions: ["contents:read", "metadata:read"], sync_pending: false, last_verified_at: Date.now(), credential_expires_at: Date.now()+3600000, legacy: { state: "resolved", evidence: "fixture only" }, provider_revocation_pending: false });
+    if ([`/api/v1/agents/${agentId}`, `/api/v1/agents/${otherId}`].includes(path)) return Response.json({ agent: options.suspendedAdmission && ++detailReads > 1 ? { ...agent, status: "suspended" } : { ...agent, id: path.endsWith(otherId) ? otherId : agentId }, pending_operation_id: null });
+    if (path.endsWith("/connections")) return Response.json({ agent_id: path.includes(otherId) ? otherId : agentId, revision: 1, generation: 1, state: "active", repositories: [{ id: 101, full_name: "fixture/own-agent" }], permissions: ["contents:read", "metadata:read"], sync_pending: false, last_verified_at: Date.now(), credential_expires_at: Date.now()+3600000, legacy: { state: "resolved", evidence: "fixture only" }, provider_revocation_pending: false });
     if (path.endsWith("/usage")) return Response.json({ rows: [] });
     if (path.endsWith("/files")) {
       if (url.searchParams.get("download") === "true") {
@@ -75,7 +75,7 @@ async function mounted(options: { interrupted?: boolean; agents?: boolean; model
     await act(async () => root.unmount()); browser.happyDOM.abort(); globalThis.fetch = originalFetch; clearActions();
     for (const [name, descriptor] of descriptors) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name); }
   };
-  return { container, requests, handlers, modes, click, settle, cleanup, finishReply() { finishReply?.(); }, setStatus(status: string) { agent.status = status; } };
+  return { container, requests, handlers, modes, click, settle, cleanup, async switchOwner() { ps.apiKey="synthetic-other-owner-key"; await act(async () => root.render(createElement("div", {}, createElement(ChatView, { ps }), createElement(AgentChatView, { ps, active: options.agentActive || false })))); }, finishReply() { try { finishReply?.(); } catch { /* A cancelled fixture stream is closed. */ } }, setStatus(status: string) { agent.status = status; } };
 }
 
 const messages = (calls: Awaited<ReturnType<typeof mounted>>["requests"]) => calls.filter((r) => r.url.pathname.endsWith("/messages"));
@@ -239,5 +239,46 @@ test("global delegation emits waiting and terminal progress without navigating o
     expect(messages(view.requests)).toHaveLength(1); expect(progress.some(p=>p.state==="running")).toBe(true);
     await act(async () => { view.finishReply(); }); await view.settle();
     expect(result.state).toBe("complete"); expect(progress.at(-1)?.state).toBe("complete"); expect(messages(view.requests)).toHaveLength(1);
+  } finally { await view.cleanup(); }
+});
+
+
+test("inline agent selection immediately dispatches only the explicitly chosen owned agent", async () => {
+  const view = await mounted({ multiple: true });
+  try {
+    await act(async () => { await view.handlers.chat!(text); }); await view.settle();
+    expect(messages(view.requests)).toHaveLength(0);
+    const select = view.container.querySelector<HTMLSelectElement>('select[aria-label="Choose task agent"]')!;
+    expect(select !== null).toBe(true);
+    await act(async () => { select.value=otherId; select.dispatchEvent(new window.Event("change", { bubbles:true })); });
+    await view.click("Use this agent");
+    expect(messages(view.requests)).toHaveLength(1); expect(messages(view.requests)[0].url.pathname).toBe(`/api/v1/agents/${otherId}/messages`);
+    expect(view.modes).not.toContain("agents");
+  } finally { await view.cleanup(); }
+});
+
+test("a consequential runtime request stays inline until its explicit confirmation while camera motion is direct", async () => {
+  const view = await mounted();
+  try {
+    await act(async () => { await view.handlers.chat!("tell the agent to publish a tweet announcing the video"); }); await view.settle();
+    expect(messages(view.requests)).toHaveLength(0); expect(view.container.textContent).toContain("Review account or destructive actions");
+    await view.click("Confirm agent task"); expect(messages(view.requests)).toHaveLength(1); expect(view.modes).not.toContain("agents");
+    await act(async () => { await view.handlers.chat!("tell the agent to make a cat video with a camera push in"); }); await view.settle();
+    expect(messages(view.requests)).toHaveLength(2); expect(view.container.querySelector(".agent-confirm")).toBeNull();
+  } finally { await view.cleanup(); }
+});
+
+
+test("account changes discard pending delegated progress and never expose old output with the new key", async () => {
+  const view = await mounted({ deferred: true });
+  try {
+    await act(async () => { void view.handlers.chat!(text); }); await view.settle();
+    expect(messages(view.requests)).toHaveLength(1);
+    await view.switchOwner(); await view.settle();
+    await act(async () => { view.finishReply(); }); await view.settle();
+    expect(view.container.textContent).not.toContain("Synthetic finished video reply.");
+    expect(view.container.querySelector('video[aria-label="Agent video deliverable"]')).toBeNull();
+    expect(messages(view.requests)).toHaveLength(1);
+    expect(view.requests.some(r=>r.authorization==="Bearer synthetic-other-owner-key" && r.url.searchParams.get("download")==="true")).toBe(false);
   } finally { await view.cleanup(); }
 });

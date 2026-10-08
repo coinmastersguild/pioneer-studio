@@ -67,3 +67,9 @@ test("a trusted per-task output name binds acceptance to newly authored video fi
     expect(() => prepareHostedAgentTask("make a cat video", invalid)).toThrow("output name");
   }
 });
+
+
+test("video task preparation requires actual visual framing and lighting review, not just a saved filename", () => {
+  const task=prepareHostedAgentTask("tell the agent to make a neon cat animation");
+  expect(task).toContain("visually inspect"); expect(task).toContain("complete subject framing"); expect(task).toContain("requested lighting");
+});
