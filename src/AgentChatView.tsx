@@ -497,7 +497,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
           if (!state.runtimeReady || !state.liveAvailable || state.busy || state.pending || state.confirmation || preparingDelegation.current || state.connectionsOpen || conversations.current.needsReview(target.id)) throw new Error("The selected agent is not ready for a new task. Review its setup, status and previous work in Agents.");
           preparingDelegation.current = true;
           let prepared = false;
-          try { prepared = await submitRef.current(params.task); }
+          try { prepareHostedAgentTask(params.task); prepared = await submitRef.current(params.task); }
           catch (error) { preparingDelegation.current = false; throw error; }
           if (!prepared || ownerSession !== authSession.current.id) { preparingDelegation.current = false; throw new Error("The task was not prepared. Review the selected agent in Agents."); }
           state.ps.setMode("agents");
