@@ -63,7 +63,7 @@ function preparedActions(assistant: ChatAssistantMessage): PreparedStudioAction[
   const actions: PreparedStudioAction[] = [];
   for (const call of assistant.tool_calls || []) {
     const action = actionForTool(call.function.name);
-    if (!action) continue;
+    if (!action) throw new Error(`The copilot requested an unavailable tool: ${call.function.name}. No action was executed.`);
     const params = paramsOf(call);
     actions.push({
       call,
@@ -99,7 +99,9 @@ Navigating is free and expected: call app.set_mode to open a screen, then use th
           : ""
       }
 
-For a one-shot image, audio, or video generation from any mode, call jobs_submit. Never print a {"job": ...} plan as assistant text: that does not execute anything. jobs_submit is paid and the client will require the user's confirmation before it runs.
+For an explicit request to tell, ask, have or delegate work to a hosted agent, use agents_delegate when advertised. agents_list can discover this owner's agents. Preserve the complete user goal and its clarification; if a target is ambiguous, let the user select it. Never substitute a generation job for an explicit hosted-agent request. agents_delegate only prepares a task for the SAME hosted-agent UI confirmation: a result with prepared:true and confirmation_required:true means no task has run yet. Report it as prepared for review, never completed, and stop until that confirmation.
+
+When jobs_submit is advertised, it can run one paid generation job using ONLY an exact model/endpoint pair and parameter schema in that tool. If no live matching endpoint is advertised, explain that it is unavailable. For video, offer local Blender authoring by a hosted agent as an explicit alternative; never claim it has started. Do not invent model names, tool names, endpoints, credentials or capabilities. Never print a {"job": ...} plan as assistant text: that does not execute anything. Paid generation and hosted-agent tasks require their own explicit user confirmation before they run.
 
 ${digest(context.mode, context.board, context.media || null)}`,
     },
