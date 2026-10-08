@@ -10,6 +10,8 @@ import type { ChatTool } from "./api";
 export type ControlResult = unknown;
 export type ControlAction = {
   name: string;
+  /** Unavailable capabilities must not be advertised or callable. */
+  available?: boolean;
   description: string;
   parameters?: Record<string, unknown>;
   /** Why this action must pause for an explicit click in the copilot rail. */
@@ -30,7 +32,7 @@ export function registerActions(actions: ControlAction[]): void {
 }
 
 export function listActions(): { name: string; description: string; parameters: Record<string, unknown>; confirmation?: string }[] {
-  return [...registry.values()].map(({ name, description, parameters, confirmation }) => ({
+  return [...registry.values()].filter((action) => action.available !== false).map(({ name, description, parameters, confirmation }) => ({
     name,
     description,
     parameters: parameters || { type: "object", properties: {}, additionalProperties: false },
@@ -62,7 +64,7 @@ export function confirmationForTool(name: string, params: Record<string, unknown
 
 export async function callAction(name: string, params?: Record<string, unknown>): Promise<ControlResult> {
   const a = registry.get(name);
-  if (!a) throw new Error(`unknown action "${name}" — known: ${[...registry.keys()].join(", ")}`);
+  if (!a || a.available === false) throw new Error(`Action "${name}" is unavailable.`);
   return a.run(params);
 }
 

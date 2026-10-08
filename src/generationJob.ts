@@ -208,6 +208,7 @@ export function createGenerationAction(context: GenerationJobContext): ControlAc
   }));
   return {
     name: "jobs.submit",
+    available: context.catalogAvailable !== false && context.models.length > 0,
     description:
       "Submit and wait for one paid generation job using the selected live endpoint schema. " +
       `Only use an exact live pair: ${catalog || "no models are currently loaded"}. ` +

@@ -50,7 +50,7 @@ export function saveAgentSetup(storageKey: string, ids: string[]): void {
 }
 export function selectVisibleAgent(agents: { id: string; status: string }[], selected: string, callbackAgent?: string): string {
   const visible = agents.filter((agent) => agent.status !== "deleted");
-  return visible.find((agent) => agent.id === selected)?.id || visible.find((agent) => agent.id === callbackAgent)?.id || visible[0]?.id || "";
+  return visible.find((agent) => agent.id === selected)?.id || visible.find((agent) => agent.id === callbackAgent)?.id || (visible.length === 1 ? visible[0].id : "");
 }
 export function pendingIntentSummary(intent: AgentIntent): string {
   if (!intent.suffix && intent.method === "POST") return `Agent claim: ${String(intent.body?.name || "unnamed")} · ${Number(intent.body?.credits || 0)} credits`;
