@@ -346,13 +346,15 @@ export async function streamAgentMessage(apiKey: string, id: string, content: st
         buffer = buffer.slice(boundary.index + boundary[0].length);
         const lines = event.split(/\r?\n/);
         const data = lines.filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
+        const errorEvent = lines.some((line) => /^event:\s*error\s*$/.test(line));
+        if (errorEvent && (!data || data === "[DONE]")) throw new AgentApiError("Agent stream failed. Check progress before sending again.", 502, "stream_error");
         if (!data) continue;
         if (data === "[DONE]") return;
         let payload;
         try { payload = JSON.parse(data); }
         catch { throw new AgentApiError("Agent stream returned invalid data. Check progress before sending again.", 502, "invalid_stream"); }
         if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new AgentApiError("Agent stream returned invalid data. Check progress before sending again.", 502, "invalid_stream");
-        if (lines.some((line) => /^event:\s*error\s*$/.test(line)) || payload.error != null || payload.detail != null) {
+        if (errorEvent || payload.error != null || payload.detail != null) {
           const failure = agentErrorDetails(payload, "Agent stream failed", "stream_error", 502);
           throw new AgentApiError(failure.message, failure.status, failure.code);
         }
