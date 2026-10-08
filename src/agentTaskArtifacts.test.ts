@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { taskArtifactFiles, verifiedVideoBlob } from "./agentTaskArtifacts";
+import { taskArtifactFiles, verifiedVideoBlob } from "./taskArtifactFiles";
 
 const prefix = "studio-00000000-0000-4000-8000-000000000001";
 test("task outputs require exact new names, regular files and bounded actual metadata", () => {

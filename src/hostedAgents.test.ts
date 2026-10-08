@@ -23,8 +23,10 @@ test("new-agent GitHub requirements survive reconnect and are isolated by verifi
 
 test("agent selection ignores deleted agents and foreign callback IDs", () => {
   const agents = [{ id: "deleted", status: "deleted" }, { id, status: "running" }, { id: "second", status: "suspended" }];
-  expect(selectVisibleAgent(agents, "deleted")).toBe(id);
-  expect(selectVisibleAgent(agents, "", "foreign")).toBe(id);
+  expect(selectVisibleAgent(agents, "deleted")).toBe("");
+  expect(selectVisibleAgent(agents, "", "foreign")).toBe("");
+  expect(selectVisibleAgent(agents, "missing")).toBe("");
+  expect(selectVisibleAgent([{ id, status: "running" }], "missing")).toBe(id);
   expect(selectVisibleAgent(agents, "second", id)).toBe("second");
   expect(selectVisibleAgent(agents, "", "second")).toBe("second");
   expect(selectVisibleAgent([{ id, status: "deleted" }], id)).toBe("");
