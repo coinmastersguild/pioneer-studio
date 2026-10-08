@@ -17,3 +17,20 @@ test("a viewed desktop is invalidated by a known generation change, not a transi
   expect(desktopRuntimeChanged(opened, "agent-a", 5)).toBe(true);
   expect(desktopRuntimeChanged(opened, "agent-b", 4)).toBe(true);
 });
+
+test("an uncertain or active conversation cannot dispatch another non-idempotent turn until explicit reconciliation", () => {
+  const conversations = new AgentConversations();
+  conversations.begin("agent-a");
+  expect(() => conversations.begin("agent-a")).toThrow();
+  conversations.finish("agent-a", false);
+  expect(conversations.needsReview("agent-a")).toBe(true);
+  expect(() => conversations.begin("agent-a")).toThrow();
+  conversations.begin("agent-b");
+  conversations.finish("agent-b", true);
+  expect(conversations.needsReview("agent-b")).toBe(false);
+  conversations.reviewed("agent-a");
+  expect(conversations.needsReview("agent-a")).toBe(false);
+  conversations.begin("agent-a");
+  conversations.finish("agent-a", true);
+  expect(conversations.needsReview("agent-a")).toBe(false);
+});
