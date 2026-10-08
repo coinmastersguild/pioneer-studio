@@ -306,3 +306,17 @@ test("an inline consequential review is bound to the originally reviewed owned a
     expect(messages(view.requests)).toHaveLength(0);expect(view.container.textContent).toContain("No task was sent");
   } finally {await view.cleanup();}
 });
+
+
+test("a completed inline selection intent cannot dispatch its old goal again", async () => {
+  const view=await mounted({multiple:true});
+  try {
+    await act(async()=>{await view.handlers.chat!(text);});await view.settle();
+    const select=view.container.querySelector<HTMLSelectElement>('select[aria-label="Choose task agent"]')!;
+    const button=[...view.container.querySelectorAll<HTMLButtonElement>("button")].find(b=>b.textContent==="Use this agent")!;
+    await act(async()=>{select.value=agentId;select.dispatchEvent(new window.Event("change",{bubbles:true}));});
+    await view.click("Use this agent");expect(messages(view.requests)).toHaveLength(1);
+    expect([...view.container.querySelectorAll("button")].some(b=>b.textContent==="Use this agent")).toBe(false);
+    await act(async()=>button.click());await view.settle();expect(messages(view.requests)).toHaveLength(1);
+  } finally {await view.cleanup();}
+});
