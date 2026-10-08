@@ -139,6 +139,31 @@ test("explicit caller cancellation aborts its sole task request without being ca
   expect(calls).toBe(1);
 });
 
+test("a hung response after heartbeats preserves partial output and cancels at the same overall deadline", async () => {
+  let expire!: () => void;
+  let calls = 0, cancelled = false;
+  let text = "";
+  const states: AgentReplyState[] = [];
+  globalThis.setTimeout = ((callback: () => void) => { expire = callback; return 1; }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = (() => {}) as typeof clearTimeout;
+  globalThis.fetch = (async () => {
+    calls++;
+    return new Response(new ReadableStream({
+      start(source) { source.enqueue(new TextEncoder().encode(': heartbeat\n\ndata: {"choices":[{"delta":{"content":"Saved partial output"}}]}\n\n: heartbeat\n\n')); },
+      cancel() { cancelled = true; },
+    }), { headers: { "Content-Type": "text/event-stream" } });
+  }) as typeof fetch;
+  const result = observeAgentReply(() => streamAgentMessage("fixture-owner", id, "Author output", "stable-conversation", (chunk) => { text += chunk; }), (state) => states.push(state)).catch((error) => error);
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  expect(text).toBe("Saved partial output");
+  expect(states).toEqual(["streaming"]);
+  expire();
+  expect((await result).message).toContain("may still be running");
+  expect(states).toEqual(["streaming", "interrupted"]);
+  expect(text).toBe("Saved partial output");
+  expect(cancelled).toBe(true); expect(calls).toBe(1);
+});
+
 test("malformed stream data and a stop frame without DONE cannot silently complete work", async () => {
   for (const data of ['data: invalid-json\n\n', 'data: {"choices":[{"delta":{"content":"Partial"},"finish_reason":"stop"}]}\n\n']) {
     let calls = 0;
