@@ -55,3 +55,15 @@ test("task preparation refuses lifecycle commands and enforces the complete UTF-
   expect(task).toContain("/api/v1/files");
   expect(() => prepareHostedAgentTask("x".repeat(16 * 1024))).toThrow("16 KiB");
 });
+
+test("a trusted per-task output name binds acceptance to newly authored video files", () => {
+  const prefix = "studio-6e02fb36-d1c8-4cef-a6a8-5ca6f1fc1532";
+  const task = prepareHostedAgentTask("make a cat video", prefix);
+  expect(task).toContain(`desktop-test/${prefix}.mp4`);
+  expect(task).toContain(`desktop-test/${prefix}.blend`);
+  expect(task).toContain("MP4");
+  expect(task).toContain("exact tool schema");
+  for (const invalid of ["../escape", "existing-video", "studio-" + "-".repeat(36), prefix.toUpperCase(), `${prefix}/file`]) {
+    expect(() => prepareHostedAgentTask("make a cat video", invalid)).toThrow("output name");
+  }
+});
