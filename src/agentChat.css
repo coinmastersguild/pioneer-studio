@@ -31,3 +31,5 @@
 .agent-chat { overflow:auto; }
 .agent-transcript { flex:1 0 220px; }
 .agent-composer { flex-shrink:0; }
+
+.agent-file-list { list-style:none; padding:0; }.agent-file-list li { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:6px 0; }.agent-file-list li span { flex:1; overflow-wrap:anywhere; }.agent-file-navigation { display:flex; gap:6px; flex-wrap:wrap; }

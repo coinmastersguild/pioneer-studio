@@ -96,6 +96,22 @@ submission is not offered.
 New Studio claims require GitHub setup: authorization, repository selection and
 verified runtime read access. Claims are paused while Alpha's GitHub capability
 is unavailable. Setup opens after claiming; tasks stay locked until verified.
+The **Agent files** panel separates persistent project files from runtime workspace
+artifacts. Download images, Blender scenes and other binary files directly; chat
+replies do not export screenshot attachments. The text editor rejects binary data
+and is limited to 1 MiB. The **Memory** panel reports host-managed availability
+and recent operation metadata, with confirmed pause/resume controls. Pausing does
+not erase facts, and memory computation is not included in displayed inference
+token usage. Fact browsing, export and deletion are unavailable.
+
+An encrypted configuration lock does not disable local browser, file or Blender
+tools. Host memory additionally requires both configuration and an enabled policy.
+Conversation IDs remain stable per agent in the signed-in tab. If a reply is
+interrupted, review status, files and logs and explicitly confirm that review
+before continuing; Studio never replays a non-idempotent task automatically.
+Runtime replacement closes a desktop from the previous observed generation;
+open a new session after readiness settles.
+
 Studio uses Alpha's durable `setup_required` and `setup_state` response metadata
 across browsers. Older responses fall back to public setup IDs stored under the
 verified owner/network. New claims also wait for Alpha's mandatory setup policy

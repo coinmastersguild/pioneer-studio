@@ -1,18 +1,22 @@
 import { useEffect, useRef, useState } from "react";
-import { AgentApiError, agentMutation, agentRequest, fetchAccount, openAgentDesktop, readAgentFile, streamAgentMessage, unlockAgent, validateAgentPath, writeAgentFile,
-  type AgentConnection, type AgentConnectionCapabilities, type AgentCatalog, type AgentFile, type AgentOperationResult, type AgentUsage, type HostedAgent } from "./api";
+import { AgentApiError, agentMutation, agentRequest, fetchAccount, openAgentDesktop, downloadAgentFile, streamAgentMessage, unlockAgent, validateAgentPath, writeAgentFile,
+  type AgentConnection, type AgentConnectionCapabilities, type AgentCatalog, type AgentOperationResult, type AgentUsage, type HostedAgent } from "./api";
 import { agentIntentStorageKey, canReplayAgentIntent, loadAgentIntents, loadAgentSetup, saveAgentSetup, selectVisibleAgent, pendingIntentSummary, newAgentIntent, parseAgentCommand, saveAgentIntents, type AgentIntent } from "./hostedAgents";
 import type { PS } from "./shared";
 import AgentConnections from "./AgentConnections";
 import { agentDesktopReady, desktopSocket, unlockKey, type DesktopSocket } from "./agentRuntime";
 import AgentDesktop from "./AgentDesktop";
+import AgentWorkspace from "./AgentWorkspace";
+import AgentMemoryPanel from "./AgentMemoryPanel";
+import { AgentConversations, desktopRuntimeChanged, type DesktopRuntimeBinding } from "./agentConversation";
+import { canEditWorkspaceFile, workspaceText, type AgentFileArea } from "./agentWorkspaceFiles";
 import { connectionReturn, connectionAvailabilityError, verifyAgentGithubSetup, connectionCapabilitiesMessage, agentRequiresGithub, agentGithubReady } from "./agentConnectionState";
 import { agentReplyPlaceholder, observeAgentReply, type AgentReplyState } from "./agentReply";
 import "./agentChat.css";
 
 type Entry = { id: string; role: "user" | "agent" | "studio"; text: string; replyState?: AgentReplyState };
 const EMPTY_ENTRIES: Entry[] = [];
-type Editor = { path: string; content: string; agentId: string };
+type Editor = { path: string; content: string; agentId: string; area: AgentFileArea };
 type Confirmation = { title: string; detail: string; restoreText?: string; run: () => Promise<void> };
 
 export default function AgentChatView({ ps, active = true }: { ps: PS; active?: boolean }) {
@@ -34,8 +38,9 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [intents, setIntents] = useState<AgentIntent[]>([]);
   const [storageKey, setStorageKey] = useState("");
-  const [files, setFiles] = useState<AgentFile[] | null>(null);
-  const [directory, setDirectory] = useState("");
+  const [filesOpen, setFilesOpen] = useState(false);
+  const [filesPath, setFilesPath] = useState("");
+  const [memoryOpen, setMemoryOpen] = useState(false);
   const [liveAvailable, setLiveAvailable] = useState(true);
   const [retryUntil, setRetryUntil] = useState(0);
   const [usage, setUsage] = useState<AgentUsage[] | null>(null);
@@ -46,6 +51,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
   const [unlockOpen, setUnlockOpen] = useState(false);
   const [unlockDraft, setUnlockDraft] = useState("");
   const [desktop, setDesktop] = useState<DesktopSocket | null>(null);
+  const desktopBinding = useRef<DesktopRuntimeBinding | null>(null);
   const [desktopBusy, setDesktopBusy] = useState(false);
   const desktopController = useRef<AbortController | null>(null);
   const [connectionFocus, setConnectionFocus] = useState(0);
@@ -62,7 +68,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
   const authSession = useRef({ credential: ps.apiKey, id: crypto.randomUUID() });
   if (authSession.current.credential !== ps.apiKey) authSession.current = { credential: ps.apiKey, id: crypto.randomUUID() };
   const [, tick] = useState(0);
-  const session = useRef(crypto.randomUUID());
+  const conversations = useRef(new AgentConversations());
   const activeKey = useRef(ps.apiKey);
   const controller = useRef<AbortController | null>(null);
   const working = useRef(false);
@@ -91,7 +97,8 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
       budget_exhausted: " Add budget with /topup, then resume if suspended.",
       not_running: " Use /resume when suspended; check /status while starting.",
       operation_pending: " Reconcile the pending operation before starting new work.",
-      agent_unavailable: " The agent is starting or unavailable. Check /status shortly.",
+      agent_unavailable: " Runtime, tool or inference work may have failed. Check status, files and logs before sending another task.",
+      capability_unavailable: " This capability is unavailable. Use the agent's available local browser, Blender or file tools; do not configure a hosted provider key.",
       insufficient_credits: " Add account credits on alpha before purchasing.",
       idempotency_expired: " Operator reconciliation is required. Do not repurchase this intent.",
       github_setup_required: " Complete or repair GitHub setup, then explicitly resend the task.",
@@ -162,13 +169,13 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
     activeKey.current = ps.apiKey;
     controller.current?.abort(); working.current = false;
     setBusy(false); setTranscripts({}); setEditor(null); setConfirmation(null); setIntents([]); setStorageKey("");
-    setCatalog(null); setAgents([]); setSelected(""); setFiles(null); setError(""); setCreate(false); setInput("");
+    setCatalog(null); setAgents([]); setSelected(""); setFilesOpen(false); setMemoryOpen(false); setError(""); setCreate(false); setInput("");
     setUsage(null); setLogs([]); setFollowingLogs(false); setMonitorError(""); setRetryUntil(0);
     setConnectionsOpen(!!callback.current); setRequiredSetup([]); requiredSetupRef.current = [];
     setSetupConnection(null); setGithubAvailable(false); setGithubAvailability("Checking GitHub setup availability…");
     setListObservedAt(null); setListError(""); setOwnerAddress("");
     setUnlockOpen(false); setUnlockDraft(""); setDesktop(null);
-    session.current = crypto.randomUUID();
+    conversations.current = new AgentConversations();
     const key = ps.apiKey; const abort = new AbortController();
     void (async () => {
       try {
@@ -272,10 +279,19 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
   }, [selected, ps.apiKey]);
   useEffect(() => {
     setUsage(null); setLogs([]); setMonitorError("");
-    setUnlockOpen(false); setUnlockDraft(""); setDesktop(null);
+    setUnlockOpen(false); setUnlockDraft(""); setDesktop(null); desktopBinding.current = null;
+    setFilesOpen(false); setFilesPath(""); setMemoryOpen(false); setEditor(null);
     desktopController.current?.abort(); desktopController.current = null; setDesktopBusy(false);
     return () => { desktopController.current?.abort(); };
   }, [selected, ps.apiKey]);
+  useEffect(() => {
+    if (!desktop || !desktopBinding.current) return;
+    if (desktopRuntimeChanged(desktopBinding.current, selected, setupConnection?.generation) || !desktopReady) {
+      desktopController.current?.abort(); desktopController.current = null;
+      desktopBinding.current = null; setDesktopBusy(false); setDesktop(null);
+      setError("The runtime changed or became unavailable. Refresh its status, then open a new desktop session.");
+    }
+  }, [desktop, desktopReady, selected, setupConnection?.generation]);
   useEffect(() => {
     if (!selected) return;
     const key = ps.apiKey; const abort = new AbortController();
@@ -318,7 +334,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
   }, [intents, busy, ps.apiKey]);
 
   async function command(name: string, argument: string, key: string, signal: AbortSignal) {
-    if (name === "help") { say("/claim · /agents · /status · /github · /files [directory] · /edit path · /logs · /usage · /egress · /topup credits · /suspend · /resume · /delete [purge]. Other messages become tasks after you confirm."); return; }
+    if (name === "help") { say("/claim · /agents · /status · /github · /files [directory] · /edit path · /memory · /logs · /usage · /egress · /topup credits · /suspend · /resume · /delete [purge]. Other messages become tasks after you confirm."); return; }
     if (name === "new" || name === "claim") { setCreate(true); return; }
     if (name === "agents" || name === "status") { await refresh(key, signal); say("Agent list refreshed from Alpha. Select an agent above. An uncertain purchase response does not mean an agent was deleted; use the saved request to reconcile its outcome."); return; }
     if (!agent) throw new Error("Create or select an agent first.");
@@ -327,20 +343,10 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
     }
     if (name === "files") {
       validateAgentPath(argument, true);
-      const result = await agentRequest<{ entries: AgentFile[] }>(key, `/${agent.id}/files?${new URLSearchParams({ path: argument })}`, { signal });
-      if (signal.aborted) return; setDirectory(argument); setFiles(result.entries); return;
+      setFilesPath(argument); setFilesOpen(true); return;
     }
-    if (name === "edit") {
-      const path = argument || "SOUL.md";
-      validateAgentPath(path);
-      let content = "";
-      {
-        try { content = await readAgentFile(key, agent.id, path, signal); }
-        catch (e) { if (!(e instanceof AgentApiError) || e.status !== 404) throw e; }
-      }
-      if (!signal.aborted) setEditor({ agentId: agent.id, path, content });
-      return;
-    }
+    if (name === "memory") { setMemoryOpen(true); return; }
+    if (name === "edit") { await openEditor(argument || "SOUL.md", "workspace", key, signal); return; }
     if (["logs", "usage", "egress"].includes(name)) {
       const suffix = name === "logs" ? "logs?tail=100" : name === "usage" ? "usage?days=30" : "egress?hours=24&limit=100";
       const result = await agentRequest<{ lines?: string[]; rows?: AgentUsage[] }>(key, `/${agent.id}/${suffix}`, { signal });
@@ -354,7 +360,18 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
     if (name === "delete" && argument && argument !== "purge") throw new Error("Use /delete or /delete purge.");
     const intent = newAgentIntent(name === "delete" ? `/${agent.id}?purge=${argument === "purge"}` : `/${agent.id}${name === "topup" ? "" : `/${name}`}`,
       name === "delete" ? "DELETE" : name === "topup" ? "PATCH" : "POST", name === "delete" ? null : name === "topup" ? { credits: amount } : {});
-    setConfirmation({ title: `${name} ${agent.name}`, detail: name === "delete" ? `No unused-budget refund. ${argument === "purge" ? "Purge permanently removes the workspace." : "The workspace is retained."}` : name === "topup" ? `Spend ${amount} credits for ${catalog?.tokens_per_credit ? (amount * catalog.tokens_per_credit).toLocaleString() : "additional"} tokens. Usage is retained; this does not resume the agent.` : `Confirm ${name} for this agent.`, run: () => guarded((currentKey) => execute(intent, currentKey)) });
+    setConfirmation({ title: `${name} ${agent.name}`, detail: name === "delete" ? `No unused-budget refund. ${argument === "purge" ? "Purge permanently removes the workspace." : "The workspace is retained."} Host-managed memory has a separate lifecycle; this does not erase remembered facts.` : name === "topup" ? `Spend ${amount} credits for ${catalog?.tokens_per_credit ? (amount * catalog.tokens_per_credit).toLocaleString() : "additional"} tokens. Usage is retained; this does not resume the agent.` : `Confirm ${name} for this agent.`, run: () => guarded((currentKey) => execute(intent, currentKey)) });
+  }
+  async function openEditor(path: string, area: AgentFileArea, key: string, signal: AbortSignal) {
+    if (!agent) return;
+    validateAgentPath(path);
+    if (!canEditWorkspaceFile({ name: path, dir: false })) throw new Error("This file is download-only. Open Agent files to download it.");
+    let content = "";
+    try {
+      const blob = await downloadAgentFile(key, agent.id, path, signal, area);
+      content = workspaceText(new Uint8Array(await blob.arrayBuffer()));
+    } catch (e) { if (!(e instanceof AgentApiError) || e.status !== 404) throw e; }
+    if (!signal.aborted) setEditor({ agentId: agent.id, path, content, area });
   }
   function confirmSync() {
     if (!agent) return;
@@ -363,7 +380,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
     const intent = newAgentIntent(`/${agent.id}/sync`, "POST", null);
     setConfirmation({ title: `Pull & restart ${agent.name}`,
       detail: "Pull the latest commit from the agent's repository and restart it. A task in progress stops. The unlock key stays in memory.",
-      run: () => guarded((key) => execute(intent, key)) });
+      run: () => guarded(async (key) => { setDesktop(null); desktopBinding.current = null; await execute(intent, key); }) });
   }
   async function openDesktop() {
     if (!agent || !desktopReady || desktopController.current) return;
@@ -372,7 +389,10 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
     setDesktopBusy(true);
     try {
       const opened = await openAgentDesktop(key, id, abort.signal);
-      if (!abort.signal.aborted && activeKey.current === key) setDesktop(desktopSocket(opened, id));
+      if (!abort.signal.aborted && activeKey.current === key) {
+        desktopBinding.current = { agentId: id, generation: setupConnection?.generation };
+        setDesktop(desktopSocket(opened, id));
+      }
     } catch (e) { if (!abort.signal.aborted && activeKey.current === key) report(e); }
     finally {
       if (desktopController.current === abort) { desktopController.current = null; setDesktopBusy(false); }
@@ -386,6 +406,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
     if (!agent) { setCreate(true); say("Create an agent, then send it a task."); return; }
     if (pending || agent.status !== "running") { setError("The agent must be running with no pending operations before sending a task."); return; }
     const id = agent.id; const agentName = agent.name;
+    if (conversations.current.needsReview(id)) { setError("The previous reply was not completed. Review this agent's status, files and logs before continuing this conversation."); return; }
     if (setupRequired) {
       let ready = false;
       await guarded(async (key, signal) => { await verifyRequiredSetup(key, id, signal); ready = !signal.aborted; });
@@ -395,15 +416,21 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
     setConfirmation({ title: `Send task to ${agentName}`, restoreText: text, detail: `This spends prepaid tokens and may cause the agent to act on its workspace and connected accounts.\n\n${text}`,
       run: () => guarded(async (key, signal) => {
         await verifyRequiredSetup(key, id, signal);
+        const conversation = conversations.current;
+        conversation.begin(id);
+        const session = conversation.forAgent(id);
+        let completed = false;
         say(text, "user"); const replyId = crypto.randomUUID();
         setEntries((prev) => [...prev, { id: replyId, role: "agent", text: "", replyState: "streaming" }]);
         try {
-          await observeAgentReply(() => streamAgentMessage(key, id, text, session.current, (chunk) => {
-            if (!signal.aborted && activeKey.current === key) setEntries((prev) => prev.map((e) => e.id === replyId ? { ...e, text: e.text + chunk } : e));
+          await observeAgentReply(() => streamAgentMessage(key, id, text, session, (chunk, mode) => {
+            if (!signal.aborted && activeKey.current === key) setEntries((prev) => prev.map((e) => e.id === replyId ? { ...e, text: mode === "replace" ? chunk : e.text + chunk } : e));
           }, signal), (replyState) => {
             if (!signal.aborted && activeKey.current === key) setEntries((prev) => prev.map((e) => e.id === replyId ? { ...e, replyState } : e));
           });
+          completed = true;
         } finally {
+          conversation.finish(id, completed);
           if (!signal.aborted && activeKey.current === key) await refresh(key, signal).catch(() => { setMonitorError("Budget refresh unavailable; retaining the last observation."); });
         }
       }) });
@@ -422,12 +449,13 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
       <button className="btn" disabled={busy || pending || connectionsOpen} onClick={() => setCreate(true)}>+ Claim agent</button>
     </div>
     <div className="agent-toolbar">
-      <label>Agent <select value={selected} disabled={busy || !!confirmation || !!editor || connectionsOpen} onChange={(e) => { setSelected(e.target.value); setFiles(null); session.current = crypto.randomUUID(); }}>
+      <label>Agent <select value={selected} disabled={busy || !!confirmation || !!editor || connectionsOpen} onChange={(e) => { setSelected(e.target.value); }}>
         <option value="">Select an agent</option>{agents.filter((a) => a.status !== "deleted").map((a) => <option key={a.id} value={a.id}>{a.name} · {a.status}</option>)}
       </select></label>
       {agent && <><span>{agent.status}</span><span>{agent.cpus} CPU · {agent.mem_gb} GB RAM · {agent.disk_gb} GB disk</span>
         <button className="btn" aria-expanded={connectionsOpen} aria-controls="agent-github-setup" disabled={busy || !!confirmation || !!editor} onClick={openConnections}>GitHub</button>
-        <button className="btn" disabled={busy || !!confirmation || !!editor || connectionsOpen} onClick={() => void guarded((key, signal) => command("files", "", key, signal))}>Workspace files</button>
+        <button className="btn" disabled={busy || !!confirmation || !!editor || connectionsOpen} onClick={() => void guarded((key, signal) => command("files", "", key, signal))}>Agent files</button>
+        <button className="btn" disabled={busy || !!confirmation || !!editor || connectionsOpen} onClick={() => setMemoryOpen(true)}>Memory</button>
         <button className="btn" title={features.unlock ? "Give the agent the key that decrypts its .env" : "Waiting for Alpha to enable unlock"} disabled={!features.unlock || !runtimeReady || busy} onClick={() => setUnlockOpen(true)}>{agent.unlocked ? "Unlocked" : "Unlock"}</button>
         <button className="btn" title={features.sync ? "Pull the latest commit and restart the agent" : "Waiting for Alpha to enable Pull & restart"} disabled={!features.sync || !runtimeReady || busy || !!confirmation} onClick={confirmSync}>Pull &amp; restart</button>
         <button className="btn" title={features.desktop ? "Open the agent's desktop" : "Waiting for Alpha to enable the desktop"} disabled={!features.desktop || !desktopReady || desktopBusy} onClick={() => void openDesktop()}>Desktop</button></>}
@@ -444,17 +472,19 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
       <p>{setupReady ? "This agent has verified read access to its selected repository." : `Your agent exists. Complete GitHub authorization, repository selection and verified access before sending tasks. ${githubAvailability}`}</p>
       {!setupReady && <button className="btn" disabled={busy || !!confirmation || !!editor} onClick={openConnections}>Continue GitHub setup</button>}
     </div>}
+    {agent?.template === "openhuman" && agent.unlocked === false && <p role="status">Encrypted configuration is locked. Local browser, files and Blender do not require unlock. Host memory also works while locked when configured and enabled. Unlock only for tasks needing your encrypted configuration.</p>}
     {agent && <div className="agent-budget">
       {agent.live ? <><progress max={Math.max(1, agent.live.budget_tokens)} value={Math.max(0, agent.live.budget_tokens - agent.live.remaining_tokens)} />
         <span>{Math.max(0, agent.live.remaining_tokens).toLocaleString()} tokens remaining · {agent.live.used_tokens.toLocaleString()} used</span></> : <span>Live budget unavailable · cumulative purchased budget {agent.token_budget.toLocaleString()} tokens</span>}
       <small>{agent.observed_at ? `Observed ${new Date(agent.observed_at).toLocaleTimeString()}` : "Awaiting observation"}{!liveAvailable ? " · live refresh unavailable; showing cached data" : ""}</small>
       <small>{usage ? `Last 30 days: ${usage.reduce((sum, row) => sum + Number(row.prompt_tokens) + Number(row.completion_tokens), 0).toLocaleString()} tokens · ${usage.reduce((sum, row) => sum + Number(row.requests), 0).toLocaleString()} requests` : "Usage awaiting observation"}</small>
+      <small>Inference token usage excludes host-memory model computation.</small>
       <button className="btn" aria-pressed={followingLogs} onClick={() => setFollowingLogs((v) => !v)}>{followingLogs ? "Stop following logs" : "Follow progress"}</button>
     </div>}
     <div className="agent-transcript" ref={scroll} aria-live="polite">
       {!entries.length && <div className="agent-welcome"><h3>Your persistent agent</h3><p>Claim or select an agent, connect its personal repository, then confirm a task. Watch its live desktop, inspect workspace files, and follow runtime logs while it works.</p>
         <p>One agent turn can use several thousand prompt tokens. Pricing and purchase availability come from the live catalog.</p>
-        <div className="agent-shortcuts">{["claim", "status", "github", "files", "logs", "usage", "help"].map((c) => <button className="btn" key={c} disabled={busy || !!confirmation || !!editor || connectionsOpen} onClick={() => { void guarded((key, signal) => command(c, "", key, signal)); }}>{`/${c}`}</button>)}</div>
+        <div className="agent-shortcuts">{["claim", "status", "github", "files", "memory", "logs", "usage", "help"].map((c) => <button className="btn" key={c} disabled={busy || !!confirmation || !!editor || connectionsOpen} onClick={() => { void guarded((key, signal) => command(c, "", key, signal)); }}>{`/${c}`}</button>)}</div>
       </div>}
       {entries.map((entry) => <div className={`agent-entry ${entry.role}`} key={entry.id}><small>{entry.role === "user" ? "You" : entry.role === "agent" ? "Agent" : "Studio"}</small><pre>{entry.text || agentReplyPlaceholder(entry.replyState)}</pre></div>)}
       {followingLogs && <div className="agent-card"><h3>Live runtime logs</h3><pre>{logs.join("\n") || "Awaiting runtime logs…"}</pre></div>}
@@ -495,7 +525,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
         void guarded(async (apiKey, signal) => {
           await unlockAgent(apiKey, id, key, signal);
           if (signal.aborted) return;
-          setUnlockOpen(false); say("Unlocked. The agent can read its secrets until it restarts.");
+          setUnlockOpen(false); say("Unlocked. The agent can use its decrypted configuration until its machine restarts.");
           await refresh(apiKey, signal).catch(() => {});
         });
       }}><h3>Unlock {agent.name}</h3>
@@ -503,15 +533,20 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
         <label>Unlock key<input type="password" autoComplete="off" spellCheck={false} value={unlockDraft} onChange={(e) => setUnlockDraft(e.target.value)} /></label>
         <button className="btn" disabled={busy || !unlockDraft.trim()}>Unlock</button> <button type="button" className="btn" onClick={() => { setUnlockDraft(""); setUnlockOpen(false); }}>Cancel</button>
       </form>}
-      {files && <div className="agent-card"><h3>Workspace /{directory}</h3><button className="btn" disabled={busy} onClick={() => void guarded((key, signal) => command("files", directory.split("/").slice(0, -1).join("/"), key, signal))}>Parent directory</button>
-        {files.map((f) => <button className="btn" key={f.name} disabled={busy || connectionsOpen || !!editor || !!confirmation} onClick={() => void guarded((key, signal) => command(f.dir ? "files" : "edit", [directory, f.name].filter(Boolean).join("/"), key, signal))}>{f.dir ? "Folder " : "File "}{f.name}</button>)}
-        {!files.length && <p>Empty directory.</p>}</div>}
+      {filesOpen && agent && <AgentWorkspace key={`${authSession.current.id}:${agent.id}:${filesPath}`} apiKey={ps.apiKey} agentId={agent.id} initialPath={filesPath}
+        onClose={() => setFilesOpen(false)} onEdit={(path, area) => { void guarded((key, signal) => openEditor(path, area, key, signal)); }} />}
+      {memoryOpen && agent && <AgentMemoryPanel key={`${authSession.current.id}:${agent.id}`} apiKey={ps.apiKey} agentId={agent.id} onClose={() => setMemoryOpen(false)} />}
+      {agent && conversations.current.needsReview(agent.id) && <div className="agent-card agent-confirm" role="status"><h3>Review the interrupted task</h3>
+        <p>The previous request ended without confirmation. It may still be running and may have performed work. Check status, saved files and runtime logs before sending another task. Studio will not replay it.</p>
+        <button className="btn" disabled={busy || !!confirmation} onClick={() => setConfirmation({ title: "Continue this conversation?",
+          detail: "Confirm that you reviewed the interrupted task and its outputs. This does not cancel it or resend it.",
+          run: async () => { conversations.current.reviewed(agent.id); tick((value) => value + 1); setError(""); } })}>I reviewed progress</button></div>}
       {editor && <form className="agent-card" onSubmit={(e) => {
         e.preventDefault(); const draft = { ...editor };
         try { validateAgentPath(draft.path); } catch (e) { report(e); return; }
         setConfirmation({ title: `Write ${draft.path}`, detail: "Replace this file in the running agent. Pull & restart overwrites files your repository ships.",
-          run: () => guarded(async (key, signal) => { await writeAgentFile(key, draft.agentId, draft.path, draft.content, signal); if (!signal.aborted) { setEditor(null); say(`Saved ${draft.path}.`); } }) });
-      }}><h3>Workspace editor</h3><label>Relative file path<input required value={editor.path} onChange={(e) => setEditor({ ...editor, path: e.target.value })} /></label>
+          run: () => guarded(async (key, signal) => { await writeAgentFile(key, draft.agentId, draft.path, draft.content, signal, draft.area); if (!signal.aborted) { setEditor(null); say(`Saved ${draft.path}.`); } }) });
+      }}><h3>{editor.area === "projects" ? "Project" : "Workspace"} text editor</h3><label>Relative file path<input required value={editor.path} onChange={(e) => setEditor({ ...editor, path: e.target.value })} /></label>
         <p>Edits here change the running agent only. Make lasting changes in your repository, then Pull &amp; restart.</p>
         <label>File contents<textarea rows={12} spellCheck={false} value={editor.content} onChange={(e) => setEditor({ ...editor, content: e.target.value })} /></label>
         <button className="btn" disabled={busy || !!confirmation}>Review save</button> <button type="button" className="btn" onClick={() => { setConfirmation(null); setEditor(null); }}>Discard</button></form>}
@@ -522,7 +557,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
       <textarea aria-label="Message your agent" placeholder="Give your agent a task, or use /new, /edit SOUL.md, /status…" rows={2} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void submit(); } }} />
       <div><small>{setupRequired && !setupReady ? "Complete required GitHub setup before sending tasks" : busy ? "Working…" : retryUntil > Date.now() ? `Retry in ${Math.ceil((retryUntil - Date.now()) / 1000)}s` : "Tasks use prepaid tokens · review before sending"}</small><button className="btn" disabled={busy || connectionsOpen || !!confirmation || !input.trim() || retryUntil > Date.now() || (setupRequired && !setupReady && !parseAgentCommand(input))}>Send</button></div>
     </form>
-    {desktop && agent && <AgentDesktop socket={desktop} busy={desktopBusy} onReconnect={() => void openDesktop()} onClose={() => { desktopController.current?.abort(); desktopController.current = null; setDesktopBusy(false); setDesktop(null); }}
+    {desktop && agent && <AgentDesktop socket={desktop} busy={desktopBusy} onReconnect={() => void openDesktop()} onClose={() => { desktopController.current?.abort(); desktopController.current = null; setDesktopBusy(false); setDesktop(null); desktopBinding.current = null; }}
       title={`${agent.name} · ${agent.status}${agent.source?.commit ? ` · ${agent.source.commit.slice(0, 7)}` : ""}${agent.unlocked === false ? " · locked" : ""}`} />}
   </div>;
 }

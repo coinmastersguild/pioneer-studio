@@ -60,7 +60,7 @@ export function pendingIntentSummary(intent: AgentIntent): string {
 
 export type AgentCommand = { name: string; argument: string };
 export function parseAgentCommand(input: string): AgentCommand | null {
-  const match = input.trim().match(/^\/(new|claim|pair|status|agents|files|edit|github|credentials|logs|usage|egress|topup|suspend|resume|delete|help)(?:\s+(.*))?$/is);
+  const match = input.trim().match(/^\/(new|claim|pair|status|agents|files|edit|github|credentials|memory|logs|usage|egress|topup|suspend|resume|delete|help)(?:\s+(.*))?$/is);
   if (match) return { name: match[1].toLowerCase(), argument: (match[2] || "").trim() };
   if (/^(create|set up|run|launch) (my |an? |own )*(agent|openclaw)\b/i.test(input)) return { name: "new", argument: "" };
   if (/^(show |check |monitor )?(my )?(agents|agent status|agent progress)\??$/i.test(input.trim())) return { name: "status", argument: "" };

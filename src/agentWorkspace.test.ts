@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { workspaceEntryPath, canEditWorkspaceFile, workspaceText, workspaceDownloadName } from "./agentWorkspace";
+import { workspaceEntryPath, canEditWorkspaceFile, workspaceText, workspaceDownloadName } from "./agentWorkspaceFiles";
 
 test("workspace navigation keeps projects and workspace paths relative and rejects traversal names", () => {
   expect(workspaceEntryPath("", "projects")).toBe("projects");
