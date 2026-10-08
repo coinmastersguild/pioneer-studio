@@ -153,6 +153,41 @@ export async function agentRequest<T>(apiKey: string, suffix: string, init: Requ
   return res.json();
 }
 
+export type AgentTurnState = { state: "idle"; turn_id?: never } | { state: "running" | "uncertain"; turn_id: string };
+const TURN_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function conversationSession(session: string): string {
+  if (typeof session !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/.test(session)) throw new Error("Invalid conversation session.");
+  return session;
+}
+function agentTurnState(value: unknown): AgentTurnState {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const v = value as Record<string, unknown>;
+    if (v.state === "idle") return { state: "idle" };
+    if ((v.state === "running" || v.state === "uncertain") && typeof v.turn_id === "string" && TURN_UUID.test(v.turn_id))
+      return { state: v.state, turn_id: v.turn_id };
+  }
+  throw new AgentApiError("Agent returned an invalid conversation state.", 502, "invalid_upstream");
+}
+
+/** Admission metadata only. Observing an outcome never resends the task. */
+export async function getAgentTurnState(apiKey: string, id: string, session: string, signal?: AbortSignal): Promise<AgentTurnState> {
+  const query = new URLSearchParams({ session: conversationSession(session) });
+  return agentTurnState(await agentRequest(apiKey, `/${encodeURIComponent(id)}/messages/state?${query}`, { signal }));
+}
+
+export async function reconcileAgentTurn(apiKey: string, id: string,
+  request: { session: string; turn_id: string; confirmed_stopped: true }, signal?: AbortSignal): Promise<AgentTurnState> {
+  const session = conversationSession(request.session);
+  if (typeof request.turn_id !== "string" || !TURN_UUID.test(request.turn_id)) throw new Error("Invalid conversation turn identity.");
+  if (request.confirmed_stopped !== true) throw new Error("Explicit stopped confirmation is required.");
+  const state = agentTurnState(await agentRequest(apiKey, `/${encodeURIComponent(id)}/messages/reconcile`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, signal,
+    body: JSON.stringify({ session, turn_id: request.turn_id, confirmed_stopped: true }),
+  }));
+  if (state.state !== "idle") throw new AgentApiError("The server did not confirm reconciliation. Review the current conversation state before trying again.", 409, "conversation_unresolved");
+  return state;
+}
+
 export function agentMutation(apiKey: string, suffix: string, method: string, body: Record<string, unknown> | null, key: string) {
   return agentRequest<AgentOperationResult>(apiKey, suffix, {
     method, headers: { "Content-Type": "application/json", "Idempotency-Key": key },
