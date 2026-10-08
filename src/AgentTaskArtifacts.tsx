@@ -6,9 +6,9 @@ import { saveWorkspaceDownload } from "./agentWorkspaceFiles";
 export default function AgentTaskArtifacts({ apiKey, agentId, prefix }: { apiKey: string; agentId: string; prefix: string }) {
   const [video, setVideo] = useState(""); const [source, setSource] = useState("");
   const [status, setStatus] = useState("Checking saved files for this task…"); const [playable, setPlayable] = useState(false);
-  const [busy, setBusy] = useState(false); const request = useRef<AbortController | null>(null);
+  const [busy, setBusy] = useState(false); const sourceRequest = useRef<AbortController | null>(null);
   useEffect(() => {
-    const abort = new AbortController(); request.current = abort; let url = "";
+    const abort = new AbortController(); let url = "";
     setVideo(""); setSource(""); setPlayable(false); setStatus("Checking saved files for this task…");
     void (async () => {
       try {
@@ -22,16 +22,16 @@ export default function AgentTaskArtifacts({ apiKey, agentId, prefix }: { apiKey
         url = URL.createObjectURL(blob); setVideo(url); setStatus("Saved MP4 found for this task; checking browser playback.");
       } catch { if (!abort.signal.aborted) setStatus("The saved video could not be verified. Inspect the agent's files and logs."); }
     })();
-    return () => { abort.abort(); if (url) URL.revokeObjectURL(url); };
+    return () => { abort.abort(); sourceRequest.current?.abort(); if (url) URL.revokeObjectURL(url); };
   }, [apiKey, agentId, prefix]);
   async function downloadSource() {
     if (!source || busy) return;
-    const abort = new AbortController(); request.current?.abort(); request.current = abort; setBusy(true);
+    const abort = new AbortController(); sourceRequest.current?.abort(); sourceRequest.current = abort; setBusy(true);
     try { const blob = await downloadAgentFile(apiKey, agentId, `desktop-test/${source}`, abort.signal, "workspace"); if (!abort.signal.aborted) saveWorkspaceDownload(blob, source); }
     catch { if (!abort.signal.aborted) setStatus("Source download did not complete."); }
     finally { if (!abort.signal.aborted) setBusy(false); }
   }
-  useEffect(() => () => request.current?.abort(), []);
+  useEffect(() => () => sourceRequest.current?.abort(), []);
   return <section className="agent-card agent-deliverables" aria-label="Task deliverables"><h3>Task deliverables</h3><p role="status">{status}</p>
     {video && <><video controls preload="metadata" src={video} aria-label="Agent video deliverable" onCanPlay={(event) => {
       const duration = event.currentTarget.duration;
