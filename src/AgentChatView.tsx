@@ -8,8 +8,9 @@ import { agentDesktopReady, desktopSocket, unlockKey, type DesktopSocket } from 
 import AgentDesktop from "./AgentDesktop";
 import AgentWorkspace from "./AgentWorkspace";
 import AgentTaskArtifacts from "./AgentTaskArtifacts";
-import { registerActions } from "./control";
-import { prepareHostedAgentTask } from "./hostedAgentDelegation";
+import { registerActions, type ControlContext } from "./control";
+import type { HostedAgentTask } from "./hostedAgentTask";
+import { prepareHostedAgentTask, hostedTaskReviewReason } from "./hostedAgentDelegation";
 import AgentMemoryPanel from "./AgentMemoryPanel";
 import { inspectAgentTurnRecovery, confirmAgentTurnRecovery } from "./agentTurnRecovery";
 import { AgentConversations, desktopRuntimeChanged, desktopRuntimeUnavailable, type DesktopRuntimeBinding } from "./agentConversation";
@@ -181,6 +182,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
     setListObservedAt(null); setListError(""); setOwnerAddress("");
     setUnlockOpen(false); setUnlockDraft(""); setDesktop(null);
     conversations.current = new AgentConversations();
+    activeTask.current = null; working.current = false; setBusy(false);
     const key = ps.apiKey; const abort = new AbortController();
     void (async () => {
       try {
@@ -342,7 +344,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
   }, [intents, busy, ps.apiKey]);
 
   async function command(name: string, argument: string, key: string, signal: AbortSignal) {
-    if (name === "help") { say("/claim · /agents · /status · /github · /files [directory] · /edit path · /memory · /logs · /usage · /egress · /topup credits · /suspend · /resume · /delete [purge]. Other messages become tasks after you confirm."); return; }
+    if (name === "help") { say("/claim · /agents · /status · /github · /files [directory] · /edit path · /memory · /logs · /usage · /egress · /topup credits · /suspend · /resume · /delete [purge]. Other messages send authoring tasks using prepaid tokens."); return; }
     if (name === "new" || name === "claim") { setCreate(true); return; }
     if (name === "agents" || name === "status") { await refresh(key, signal); say("Agent list refreshed from Alpha. Select an agent above. An uncertain purchase response does not mean an agent was deleted; use the saved request to reconcile its outcome."); return; }
     if (!agent) throw new Error("Create or select an agent first.");
@@ -429,54 +431,84 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
       if (desktopController.current === abort) { desktopController.current = null; setDesktopBusy(false); }
     }
   }
+  const activeTask = useRef<{ owner: string; goal: string; progress: HostedAgentTask; promise: Promise<HostedAgentTask>; observers: Set<(task: HostedAgentTask) => void> } | null>(null);
+  async function runTask(goal: string, context?: ControlContext): Promise<HostedAgentTask> {
+    const state = delegationState.current;
+    const target = state.agents.find((item) => item.id === state.selected);
+    const id = target?.id; const owner = authSession.current.id; const key = state.ps.apiKey;
+    const previous = activeTask.current;
+    if (previous && previous.owner === owner && previous.progress.agent_id === id &&
+        (["checking", "running"].includes(previous.progress.state) || conversations.current.needsReview(id!))) {
+      const observe = context?.onHostedTask ? (task: HostedAgentTask) => context.onHostedTask!({ ...task, existing: true }) : undefined;
+      if (observe) { previous.observers.add(observe); observe(previous.progress); }
+      try { return { ...await previous.promise, existing: true }; }
+      finally { if (observe) previous.observers.delete(observe); }
+    }
+    if (!id || !target || !key) throw new Error("Select your own intended agent in Agents before delegating. No task was sent.");
+    if (working.current || state.busy || state.pending || (state.confirmation && !context?.hostedTaskConfirmed) || state.connectionsOpen || !state.liveAvailable || target.status !== "running" || retryUntil > Date.now())
+      throw new Error("The selected agent is not ready for a new task. Check its setup and current operation; no task was sent.");
+    if (conversations.current.needsReview(id)) throw new Error("Review the interrupted previous task before sending more work. It was not retried.");
+    const outputPrefix = /\b(?:video|movie|animation|animate|animated|clip)\b/i.test(goal) ? `studio-${crypto.randomUUID()}` : undefined;
+    const text = prepareHostedAgentTask(goal, outputPrefix);
+    const progress: HostedAgentTask = { task_id: crypto.randomUUID(), agent_id: id, name: target.name, state: "checking", text: "" };
+    const observers = new Set<(task: HostedAgentTask) => void>(); if (context?.onHostedTask) observers.add(context.onHostedTask);
+    // Reserve synchronously before awaiting admission. React's busy state is not a lock.
+    working.current = true; setBusy(true); setError("");
+    const abort = new AbortController(); controller.current = abort;
+    const task = { owner, goal, progress, promise: Promise.resolve(progress), observers }; activeTask.current = task;
+    const current = () => !abort.signal.aborted && owner === authSession.current.id && activeKey.current === key;
+    const emit = (update: Partial<HostedAgentTask>) => {
+      task.progress = { ...task.progress, ...update };
+      if (current()) for (const observer of observers) observer({ ...task.progress });
+    };
+    emit({});
+    task.promise = (async () => {
+      const conversation = conversations.current; let begun = false; let completed = false;
+      const replyId = crypto.randomUUID();
+      const updateEntries = (update: (previous: Entry[]) => Entry[]) => { if (current()) setTranscripts((previous) => ({ ...previous, [id]: update(previous[id] || []) })); };
+      try {
+        await verifyRequiredSetup(key, id, abort.signal);
+        if (!current()) throw new Error("Account changed; no task result belongs to this session.");
+        conversation.begin(id); begun = true; setInput("");
+        updateEntries((entries) => [...entries, { id: crypto.randomUUID(), role: "user", text }, { id: replyId, role: "agent", text: "", replyState: "streaming" }]);
+        emit({ state: "running" });
+        let reply = "";
+        await observeAgentReply(() => streamAgentMessage(key, id, text, conversation.forAgent(id), (chunk, mode) => {
+          reply = mode === "replace" ? chunk : reply + chunk;
+          updateEntries((entries) => entries.map((entry) => entry.id === replyId ? { ...entry, text: reply } : entry));
+          emit({ text: reply });
+        }, abort.signal), (replyState) => updateEntries((entries) => entries.map((entry) => entry.id === replyId ? { ...entry, replyState } : entry)));
+        completed = true;
+        updateEntries((entries) => entries.map((entry) => entry.id === replyId ? { ...entry, outputPrefix } : entry));
+        emit({ state: reply.trim() ? "complete" : "empty", text: reply, outputPrefix });
+        if (current()) setFilesOpen(true);
+      } catch (error) {
+        emit({ state: begun ? "uncertain" : "failed", text: error instanceof Error ? error.message : "Agent request failed" });
+        if (current()) report(error);
+      } finally {
+        if (begun) conversation.finish(id, completed);
+        if (current()) {
+          working.current = false; setBusy(false);
+          await refresh(key, abort.signal).catch(() => { if (current()) setMonitorError("Budget refresh unavailable; retaining the last observation."); });
+        }
+      }
+      if (!current()) throw new Error("Account changed; this task's result was discarded. It was not retried.");
+      return { ...task.progress };
+    })();
+    return task.promise;
+  }
   async function submit(value = input): Promise<boolean> {
-    const raw = value.trim(); let text = raw; if (!text || busy || connectionsOpen || confirmation || retryUntil > Date.now()) return false;
+    const text = value.trim(); if (!text || busy || connectionsOpen || confirmation || retryUntil > Date.now()) return false;
     const parsed = parseAgentCommand(text);
     if (parsed) { setInput(""); say(text, "user"); await guarded((key, signal) => command(parsed.name, parsed.argument, key, signal)); return false; }
     if (text.startsWith("/")) { say("Unknown command. Use /help for Studio commands."); return false; }
-    if (!agent) { setCreate(true); say("Create an agent, then send it a task."); return false; }
-    if (pending || agent.status !== "running") { setError("The agent must be running with no pending operations before sending a task."); return false; }
-    const id = agent.id; const agentName = agent.name;
-    const outputPrefix = /\b(?:video|movie|animation|animate|animated|clip)\b/i.test(raw) ? `studio-${crypto.randomUUID()}` : undefined;
-    if (outputPrefix) { try { text = prepareHostedAgentTask(raw, outputPrefix); } catch (error) { report(error); return false; } }
-    if (conversations.current.needsReview(id)) { setError("The previous reply was not completed. Review this agent's status, files and logs before continuing this conversation."); return false; }
-    if (setupRequired) {
-      let ready = false;
-      await guarded(async (key, signal) => { await verifyRequiredSetup(key, id, signal); ready = !signal.aborted; });
-      if (!ready) { setConnectionsOpen(true); return false; }
-    }
-    setInput("");
-    setConfirmation({ title: `Send task to ${agentName}`, restoreText: text, detail: `This spends prepaid tokens and may cause the agent to act on its workspace and connected accounts.\n\n${text}`,
-      run: () => guarded(async (key, signal) => {
-        await verifyRequiredSetup(key, id, signal);
-        const conversation = conversations.current;
-        conversation.begin(id);
-        const session = conversation.forAgent(id);
-        let completed = false;
-        say(text, "user"); const replyId = crypto.randomUUID();
-        setEntries((prev) => [...prev, { id: replyId, role: "agent", text: "", replyState: "streaming" }]);
-        try {
-          await observeAgentReply(() => streamAgentMessage(key, id, text, session, (chunk, mode) => {
-            if (!signal.aborted && activeKey.current === key) setEntries((prev) => prev.map((e) => e.id === replyId ? { ...e, text: mode === "replace" ? chunk : e.text + chunk } : e));
-          }, signal), (replyState) => {
-            if (!signal.aborted && activeKey.current === key) setEntries((prev) => prev.map((e) => e.id === replyId ? { ...e, replyState } : e));
-          });
-          completed = true;
-          if (!signal.aborted && activeKey.current === key) {
-            setFilesOpen(true);
-            if (outputPrefix) setEntries((prev) => prev.map((entry) => entry.id === replyId ? { ...entry, outputPrefix } : entry));
-          }
-        } finally {
-          conversation.finish(id, completed);
-          if (!signal.aborted && activeKey.current === key) await refresh(key, signal).catch(() => { setMonitorError("Budget refresh unavailable; retaining the last observation."); });
-        }
-      }) });
-    return true;
+    const review = hostedTaskReviewReason(text);
+    if (review) { setConfirmation({ title: "Review account or destructive actions", detail: `${review}\n\n${text}`, restoreText: text, run: async () => { try { await runTaskRef.current(text, { hostedTaskConfirmed: true }); } catch (error) { report(error); } } }); return true; }
+    try { const task = await runTask(text); return task.state === "complete" || task.state === "empty"; }
+    catch (error) { report(error); return false; }
   }
-  const submitRef = useRef(submit);
-  submitRef.current = submit;
-  const preparingDelegation = useRef(false);
-  useEffect(() => { if (!confirmation) preparingDelegation.current = false; }, [confirmation]);
+  const submitRef = useRef(submit); submitRef.current = submit;
+  const runTaskRef = useRef(runTask); runTaskRef.current = runTask;
   const delegationState = useRef({ ps, agents, selected, busy, pending, confirmation, connectionsOpen, runtimeReady, liveAvailable });
   delegationState.current = { ps, agents, selected, busy, pending, confirmation, connectionsOpen, runtimeReady, liveAvailable };
   useEffect(() => {
@@ -487,21 +519,30 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
         if (ownerSession !== authSession.current.id || !state.ps.apiKey) throw new Error("Sign in and reopen your agent list.");
         return { agents: state.agents.filter((item) => item.status !== "deleted").map((item) => ({ id: item.id, name: item.name, status: item.status, selected: item.id === state.selected, runnable: item.id === state.selected && state.runtimeReady && state.liveAvailable })) };
       } },
-      { name: "agents.delegate", description: "Prepare a task for the owner's currently selected hosted agent. Opens its existing task review; explicit owner confirmation is required before tokens are spent. Use available local Blender/browser tools, not a media model endpoint.",
+      { name: "agents.select", advertise: false, description: "Select one of the signed-in owner's existing agents. This does not execute a task or change the agent.",
+        parameters: { type: "object", properties: { agent_id: { type: "string" } }, required: ["agent_id"], additionalProperties: false },
+        run: (params) => {
+          const state = delegationState.current;
+          if (ownerSession !== authSession.current.id || !state.ps.apiKey || !params || Object.keys(params).some((key) => key !== "agent_id") || typeof params.agent_id !== "string") throw new Error("A signed-in owner and valid agent selection are required.");
+          const target = state.agents.find((item) => item.id === params.agent_id && item.status !== "deleted");
+          if (!target || working.current || state.confirmation) throw new Error("Select an available owned agent after the current request finishes.");
+          state.selected = target.id; state.pending = intentsRef.current.length > 0 || !!target.pending_operation_id;
+          setSelected(target.id); return { selected: true, agent_id: target.id };
+        } },
+      { name: "agents.delegate", description: "Run the owner's requested authoring task on the currently selected hosted agent. Uses prepaid inference tokens. Reports ongoing/completed/interrupted progress without changing workspace; never purchases, publishes or runs lifecycle commands.",
         parameters: { type: "object", properties: { task: { type: "string" }, agent_id: { type: "string", description: "Optional ID, which must match the owner's currently selected agent" } }, required: ["task"], additionalProperties: false },
-        run: async (params) => {
+        run: async (params, context) => {
           const state = delegationState.current;
           if (ownerSession !== authSession.current.id || !state.ps.apiKey || !params || Object.keys(params).some((key) => !["task", "agent_id"].includes(key)) || typeof params.task !== "string") throw new Error("A signed-in owner and a valid task are required.");
           const target = state.agents.find((item) => item.id === state.selected);
-          if (!target || (params.agent_id !== undefined && params.agent_id !== target.id)) throw new Error("Select your own intended agent in Agents before delegating. No task was sent.");
-          if (!state.runtimeReady || !state.liveAvailable || state.busy || state.pending || state.confirmation || preparingDelegation.current || state.connectionsOpen || conversations.current.needsReview(target.id)) throw new Error("The selected agent is not ready for a new task. Review its setup, status and previous work in Agents.");
-          preparingDelegation.current = true;
-          let prepared = false;
-          try { prepareHostedAgentTask(params.task); prepared = await submitRef.current(params.task); }
-          catch (error) { preparingDelegation.current = false; throw error; }
-          if (!prepared || ownerSession !== authSession.current.id) { preparingDelegation.current = false; throw new Error("The task was not prepared. Review the selected agent in Agents."); }
-          state.ps.setMode("agents");
-          return { prepared: true, confirmation_required: true, agent_id: target.id, name: target.name };
+          if (params.agent_id !== undefined && (!target || params.agent_id !== target.id)) throw new Error("Select your own intended agent before delegating. No task was sent.");
+          if (!target) return { selection_required: true, agents: state.agents.filter((item) => item.status !== "deleted").map(({ id, name, status }) => ({ id, name, status })) };
+          // Ordinary owner authoring is authorized by the request itself. The shared
+          // executor rechecks current ownership/setup and fences an existing turn.
+          prepareHostedAgentTask(params.task);
+          const review = hostedTaskReviewReason(params.task);
+          if (review && !context?.hostedTaskConfirmed && !working.current) return { confirmation_required: true, detail: review, agent_id: target.id, name: target.name };
+          return runTaskRef.current(params.task, context);
         } },
     ]);
   }, [ps.apiKey]);
@@ -554,12 +595,12 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
       <button className="btn" aria-pressed={followingLogs} onClick={() => setFollowingLogs((v) => !v)}>{followingLogs ? "Stop following logs" : "Follow progress"}</button>
     </div>}
     <div className="agent-transcript" ref={scroll} aria-live="polite">
-      {!entries.length && <div className="agent-welcome"><h3>Your persistent agent</h3><p>Claim or select an agent, connect its personal repository, then confirm a task. Watch its live desktop, inspect workspace files, and follow runtime logs while it works.</p>
+      {!entries.length && <div className="agent-welcome"><h3>Your persistent agent</h3><p>Claim or select an agent, connect its personal repository, then send a task. Watch its live desktop, inspect workspace files, and follow runtime logs while it works.</p>
         <p>One agent turn can use several thousand prompt tokens. Pricing and purchase availability come from the live catalog.</p>
         <div className="agent-shortcuts">{["claim", "status", "github", "files", "memory", "logs", "usage", "help"].map((c) => <button className="btn" key={c} disabled={busy || !!confirmation || !!editor || connectionsOpen} onClick={() => { void guarded((key, signal) => command(c, "", key, signal)); }}>{`/${c}`}</button>)}</div>
       </div>}
       {entries.map((entry) => <div className={`agent-entry ${entry.role}`} key={entry.id}><small>{entry.role === "user" ? "You" : entry.role === "agent" ? "Agent" : "Studio"}</small><pre>{entry.text || agentReplyPlaceholder(entry.replyState)}</pre>
-        {entry.outputPrefix && agent && <AgentTaskArtifacts key={`${authSession.current.id}:${agent.id}:${entry.outputPrefix}`} apiKey={ps.apiKey} agentId={agent.id} prefix={entry.outputPrefix} />}
+        {entry.outputPrefix && agent && active && <AgentTaskArtifacts key={`${authSession.current.id}:${agent.id}:${entry.outputPrefix}`} apiKey={ps.apiKey} agentId={agent.id} prefix={entry.outputPrefix} />}
         {entry.replyState === "streaming" && <p role="status">Tool work may take up to 15 minutes. Replies arrive as completed content, rather than a live tool or token feed. Watch the desktop or runtime logs for progress.</p>}</div>)}
       {followingLogs && <div className="agent-card"><h3>Live runtime logs</h3><pre>{logs.join("\n") || "Awaiting runtime logs…"}</pre></div>}
       {monitorError && <p role="status">{monitorError}</p>}
@@ -627,7 +668,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
     </div>
     <form className="agent-composer" onSubmit={(e) => { e.preventDefault(); void submit(); }}>
       <textarea aria-label="Message your agent" placeholder="Give your agent a task, or use /new, /edit SOUL.md, /status…" rows={2} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void submit(); } }} />
-      <div><small>{setupRequired && !setupReady ? "Complete required GitHub setup before sending tasks" : busy ? "Working…" : retryUntil > Date.now() ? `Retry in ${Math.ceil((retryUntil - Date.now()) / 1000)}s` : "Tasks use prepaid tokens · review before sending"}</small><button className="btn" disabled={busy || connectionsOpen || !!confirmation || !input.trim() || retryUntil > Date.now() || (setupRequired && !setupReady && !parseAgentCommand(input))}>Send</button></div>
+      <div><small>{setupRequired && !setupReady ? "Complete required GitHub setup before sending tasks" : busy ? "Working…" : retryUntil > Date.now() ? `Retry in ${Math.ceil((retryUntil - Date.now()) / 1000)}s` : "Send authorizes a task using prepaid tokens"}</small><button className="btn" disabled={busy || connectionsOpen || !!confirmation || !input.trim() || retryUntil > Date.now() || (setupRequired && !setupReady && !parseAgentCommand(input))}>Send</button></div>
     </form>
     {desktop && agent && <AgentDesktop socket={desktop} busy={desktopBusy} onReconnect={() => void openDesktop()} onClose={() => { desktopController.current?.abort(); desktopController.current = null; setDesktopBusy(false); setDesktop(null); desktopBinding.current = null; }}
       title={`${agent.name} · ${agent.status}${agent.source?.commit ? ` · ${agent.source.commit.slice(0, 7)}` : ""}${agent.unlocked === false ? " · locked" : ""}`} />}

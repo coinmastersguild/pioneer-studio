@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { actionForTool, actionTools, clearActions, registerActions } from "./control";
+import { actionForTool, actionTools, callAction, clearActions, registerActions } from "./control";
 import { beginStudioAgentTurn, continueStudioAgentTurn, executeStudioAction, finishStudioAgentTurn } from "./studioAgent";
 
 test("registered actions become model tools and execute through the same handler", async () => {
@@ -201,4 +201,29 @@ test("agent turns retain history and continue through multiple action rounds", a
   expect(turn.assistant.content).toBe("Counter is three.");
   expect(requests[1].tool_choice).toBe("auto");
   expect(requests[2].messages.filter((message: any) => message.role === "tool")).toHaveLength(2);
+});
+
+
+test("direct hosted-task outcomes stop every tool loop without a model-generated completion or retry", async () => {
+  const original=globalThis.fetch; let modelCalls=0;
+  globalThis.fetch=(async()=>{modelCalls++;throw new Error("No model fallback is authorized");}) as typeof fetch;
+  try {
+    for (const state of ["running","complete","empty","uncertain","failed"] as const) {
+      clearActions(); registerActions([{name:"agents.delegate",description:"Run requested authoring",run:()=>({state,agent_id:"fixture",task_id:"fixture",name:"Fixture",text:"Fixture response"})}]);
+      const turn=await beginStudioAgentTurn("test-key","tell the agent to make a cat video",{mode:"head",board:null});
+      const result=await executeStudioAction(turn.actions[0]);
+      const next=await continueStudioAgentTurn("test-key",turn,[result]);
+      expect(next.actions).toHaveLength(0); expect(next.assistant.content).not.toContain("video is done");
+      await finishStudioAgentTurn("test-key",turn,[result]);
+    }
+    expect(modelCalls).toBe(0);
+  } finally {globalThis.fetch=original;}
+});
+
+
+test("inline owner selection is callable by its UI but cannot be chosen by a model tool", async () => {
+  clearActions();let selected=0;
+  registerActions([{name:"agents.select",advertise:false,description:"Choose owned target",run:()=>{selected++;return{selected:true};}}]);
+  expect(actionTools().some(t=>t.function.name==="agents_select")).toBe(false);
+  await callAction("agents.select",{agent_id:"fixture"});expect(selected).toBe(1);
 });
