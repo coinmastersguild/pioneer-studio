@@ -21,6 +21,7 @@ import { beatReadiness, boardReadiness } from "./readiness";
 import { registerActions } from "./control";
 import { openJobForm } from "./jobHandoff";
 import { sendPropToStage } from "./stageHandoff";
+import { modelActionAvailable } from "./modelActionAvailability";
 
 // Assets panel: character roster (propose → approve
 // → driving images), batch scene/tracer drafting, sound, and final renders.
@@ -168,6 +169,7 @@ export default function AssetsPanel({
       },
       {
         name: "board.render_finals",
+        available: modelActionAvailable(ps, "video"),
         description:
           "Render the final video clip for every beat passing the readiness gate. Beats that do not pass " +
           "are skipped — call board.get_state to see what blocks them.",
@@ -183,7 +185,7 @@ export default function AssetsPanel({
       },
     ]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [ps.models, ps.catalogAvailable]);
 
   const drivingPrompt = (c: { name: string; description: string; prompt: string }) =>
     `Character sheet of ${c.name}: ${c.description}. ${c.prompt} Full body, single character, neutral studio background, high detail, consistent design.`;

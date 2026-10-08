@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { actionForTool, actionTools, registerActions } from "./control";
+import { actionForTool, actionTools, clearActions, registerActions } from "./control";
 import { beginStudioAgentTurn, continueStudioAgentTurn, executeStudioAction, finishStudioAgentTurn } from "./studioAgent";
 
 test("registered actions become model tools and execute through the same handler", async () => {
@@ -40,7 +40,7 @@ test("registered actions become model tools and execute through the same handler
   }) as typeof fetch;
 
   const turn = await beginStudioAgentTurn("key", "seek to four seconds", { mode: "studio", board: null });
-  expect(requests[0].messages[0].content).toContain("call jobs_submit");
+  expect(requests[0].messages[0].content).toContain("When jobs_submit is advertised");
   expect(requests[0].messages[0].content).toContain('Never print a {"job": ...} plan');
   expect(turn.actions[0]).toMatchObject({ actionName: "test.seek", params: { t: 4 }, confirmation: "confirm seek to 4" });
   const result = await executeStudioAction(turn.actions[0]);
@@ -50,6 +50,121 @@ test("registered actions become model tools and execute through the same handler
   expect(requests[0].tools[0].function.parameters.required).toEqual(["t"]);
   expect(requests[1].messages.at(-1)).toMatchObject({ role: "tool", tool_call_id: "call-1" });
   expect(requests[1].tool_choice).toBe("none");
+});
+
+test("unknown model tools fail before any action can be reported as completed", async () => {
+  clearActions();
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ choices: [{ message: {
+    content: null,
+    tool_calls: [{ id: "invented", type: "function", function: { name: "ltx_video_generate", arguments: "{}" } }],
+  } }] }), { status: 200 })) as typeof fetch;
+  try {
+    await expect(beginStudioAgentTurn("test-key", "make a cat video", { mode: "chat", board: null })).rejects.toThrow("unavailable tool");
+  } finally { globalThis.fetch = original; }
+});
+
+test("the app copilot stages explicit delegation through advertised hosted-agent actions", async () => {
+  clearActions();
+  registerActions([{ name: "agents.delegate", description: "Prepare a hosted-agent task for its UI confirmation", run: () => ({ prepared: true, confirmation_required: true }) }]);
+  const original = globalThis.fetch;
+  let prompt = "";
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    prompt = JSON.parse(String(init?.body)).messages[0].content;
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Review the prepared task." } }] }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    await beginStudioAgentTurn("test-key", "Which hosted-agent tools are available?", { mode: "chat", board: null });
+    expect(prompt).toContain("agents_delegate");
+    expect(prompt).toContain("confirmation_required");
+    expect(prompt).toContain("Never substitute a generation job");
+    expect(prompt).toContain("Do not invent");
+  } finally { globalThis.fetch = original; }
+});
+
+test("all Copilot callers stop at hosted-agent preparation instead of asking the model to claim completion", async () => {
+  clearActions();
+  registerActions([{ name: "agents.delegate", description: "Prepare a task", run: () => ({ prepared: true, confirmation_required: true }) }]);
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    return new Response(JSON.stringify({ choices: [{ message: calls === 1
+      ? { content: null, tool_calls: [{ id: "prepared", type: "function", function: { name: "agents_delegate", arguments: '{"task":"make a cat video"}' } }] }
+      : { content: "The video is done." },
+    }] }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const turn = await beginStudioAgentTurn("test-key", "tell the agent to make a cat video", { mode: "head", board: null });
+    const result = await executeStudioAction(turn.actions[0]);
+    const next = await continueStudioAgentTurn("test-key", turn, [result]);
+    expect(calls).toBe(0);
+    expect(next.actions).toHaveLength(0);
+    expect(next.assistant.content).toContain("not run");
+    expect(next.assistant.content).toContain("confirm");
+    expect(await finishStudioAgentTurn("test-key", turn, [result])).toContain("not run");
+    expect(calls).toBe(0);
+  } finally { globalThis.fetch = original; }
+});
+
+test("explicit delegation never reaches a model that could choose an available paid job", async () => {
+  clearActions();
+  let paidJobs = 0;
+  registerActions([
+    { name: "agents.delegate", description: "Prepare a task", run: () => ({ prepared: true, confirmation_required: true }) },
+    { name: "jobs.submit", description: "An actual paid catalog job", run: () => { paidJobs++; } },
+  ]);
+  const original = globalThis.fetch;
+  let modelCalls = 0;
+  globalThis.fetch = (async () => {
+    modelCalls++;
+    return Response.json({ choices: [{ message: { content: "Rendering now", tool_calls: [
+      { id: "wrong-route", type: "function", function: { name: "jobs_submit", arguments: '{"model":"actual-video","endpoint":"render","params":{}}' } },
+    ] } }] });
+  }) as typeof fetch;
+  try {
+    const originalGoal = "tell the agent to make me a cat video";
+    const turn = await beginStudioAgentTurn("test-key", "A cat walking through a garden", { mode: "head", board: null,
+      history: [{ role: "user", content: originalGoal }, { role: "assistant", content: "I asked: Which scene?" }],
+    });
+    expect(modelCalls).toBe(0);
+    expect(turn.actions).toHaveLength(1);
+    expect(turn.actions[0].actionName).toBe("agents.delegate");
+    expect(turn.actions[0].params.task).toContain(originalGoal);
+    expect(turn.actions[0].params.task).toContain("A cat walking through a garden");
+    await executeStudioAction(turn.actions[0]);
+    expect(paidJobs).toBe(0);
+    clearActions(); registerActions([{ name: "jobs.submit", description: "Paid job", run: () => { paidJobs++; } }]);
+    await expect(beginStudioAgentTurn("test-key", originalGoal, { mode: "head", board: null })).rejects.toThrow("Hosted-agent delegation is unavailable");
+    expect(modelCalls).toBe(0);
+    expect(paidJobs).toBe(0);
+  } finally { globalThis.fetch = original; }
+});
+
+test("failed hosted-task preparation cannot resume a model round or substitute a paid job", async () => {
+  clearActions();
+  let paidJobs = 0; let modelCalls = 0;
+  registerActions([
+    { name: "agents.delegate", description: "Prepare a task", run: () => { throw new Error("Selected agent is busy; review its current task."); } },
+    { name: "jobs.submit", description: "An available paid job", run: () => { paidJobs++; } },
+  ]);
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    modelCalls++;
+    return Response.json({ choices: [{ message: { content: "Rendering instead", tool_calls: [
+      { id: "fallback", type: "function", function: { name: "jobs_submit", arguments: "{}" } },
+    ] } }] });
+  }) as typeof fetch;
+  try {
+    const turn = await beginStudioAgentTurn("test-key", "tell the agent to make a cat video", { mode: "head", board: null });
+    const result = await executeStudioAction(turn.actions[0]);
+    expect(result.error).toContain("busy");
+    const next = await continueStudioAgentTurn("test-key", turn, [result]);
+    expect(next.actions).toHaveLength(0);
+    expect(next.assistant.content).toContain("could not be prepared");
+    expect(await finishStudioAgentTurn("test-key", turn, [result])).toContain("could not be prepared");
+    expect(modelCalls).toBe(0); expect(paidJobs).toBe(0);
+  } finally { globalThis.fetch = original; }
 });
 
 test("agent turns retain history and continue through multiple action rounds", async () => {

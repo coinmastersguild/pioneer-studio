@@ -1,7 +1,7 @@
 // Unit checks for the pure feature modules: readiness score, prompt pack,
 // final-prompt templating, preview cut, and the camera solve on synthetic frames.
 // Run: bun test src/features.test.ts
-import { expect, mock, test } from "bun:test";
+import { expect, test } from "bun:test";
 
 // localStorage shim (pipeline/api import it at module scope)
 const mem = new Map<string, string>();
@@ -678,12 +678,13 @@ test("requestJobPlan retries once when the reply lacks a JSON object", async () 
     "I will render that with LTX-2.3 at 1536x896, 240 frames at 24fps. That is a 10-second clip.",
     '{"say":"Rendering a 10s photorealistic bouncing-breasts clip.","job":{"model":"ltx-2.3","endpoint":"generate","params":{"prompt":"photorealistic breasts bouncing, 1536x896"},"refs":[]}}',
   ];
-  mock.module("./api", () => ({
-    chatCompletion: async (_k: string, msgs: import("./api").ChatMessage[]) => {
-      calls.push(msgs);
-      return replies[calls.length - 1];
-    },
-  } as any));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const msgs = JSON.parse(String(init?.body)).messages;
+    calls.push(msgs);
+    return Response.json({ choices: [{ message: { content: replies[calls.length - 1] } }] });
+  }) as typeof fetch;
+  try {
   const { requestJobPlan, hasJsonObject } = await import("./copilot");
   const models: import("./api").JobModel[] = [
     { model: "ltx-2.3", endpoint: "generate", credits: 80, note: "text-to-video" },
@@ -697,6 +698,7 @@ test("requestJobPlan retries once when the reply lacks a JSON object", async () 
   expect(hasJsonObject('{"say":"x"}')).toBe(true);
   expect(plan.job?.model).toBe("ltx-2.3");
   expect(plan.say).toContain("photorealistic");
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test("a character keeps one voice across lines, and survives an evicted id", async () => {

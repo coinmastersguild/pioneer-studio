@@ -22,6 +22,7 @@ import VrmPicker from "./VrmPicker";
 import { registerActions } from "./control";
 import { queueStudioAsset } from "./studioHandoff";
 import { consumeStageProp } from "./stageHandoff";
+import { modelActionAvailable } from "./modelActionAvailability";
 import "./stage.css";
 
 const TAKE_SECONDS = 10; // matches the storyboard's default beat duration
@@ -987,6 +988,7 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
       },
       {
         name: "animate.generate_motion",
+        available: motionUp === true,
         description: "Generate motion for the selected actor from its current prompt",
         confirmation: "Starts a paid motion-generation job",
         run: () => actionFnsRef.current.generate(),
@@ -1014,8 +1016,9 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
       },
       {
         name: "animate.enhance_take",
-        description: "Finish the recorded ARDY skeleton take as a pose-controlled LTX video and queue it in Studio",
-        confirmation: "Starts a paid LTX pose-controlled video job (1000cr for 5s or 2000cr for 10s)",
+        available: modelActionAvailable(ps, "motion_video"),
+        description: "Finish the recorded skeleton take as pose-controlled video using the live catalog and queue it in Studio",
+        confirmation: "Starts one paid pose-controlled video job at the live catalog price",
         run: () => {
           if (!take) throw new Error("record a take first");
           return actionFnsRef.current.enhanceTake();
@@ -1023,7 +1026,7 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
       },
     ]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [take, uploadedTake, finishedTake]);
+  }, [take, uploadedTake, finishedTake, motionUp, ps.models, ps.catalogAvailable]);
 
   const cur = actors[selected];
   const motionVideoModel = pickModel(ps.models, "motion_video");
@@ -1339,7 +1342,7 @@ export default function StageView({ ps, active }: { ps: PS; active: boolean }) {
             </label>
             <div className="st-row between">
               <span className="sp-info hint">{take.ltxReady ? "IC-LoRA capture profile" : "record in an LTX mode first"}</span>
-              <button type="button" className="sp-btn gen" disabled={!motionVideoModel || !take.ltxReady || enhancing} onClick={enhanceTake}>
+              <button type="button" className="sp-btn gen" disabled={!ps.catalogAvailable || !motionVideoModel || !take.ltxReady || enhancing} onClick={enhanceTake}>
                 {enhancing ? "LTX rendering…" : "Finish motion"}
               </button>
             </div>

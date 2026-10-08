@@ -9,6 +9,7 @@ import {
 import { actionForTool, actionTools, callAction, confirmationForTool } from "./control";
 import type { Mode } from "./shared";
 import { loadPipeline } from "./pipeline";
+import { hostedAgentRequest } from "./hostedAgentDelegation";
 
 export type PreparedStudioAction = {
   call: ChatToolCall;
@@ -63,7 +64,7 @@ function preparedActions(assistant: ChatAssistantMessage): PreparedStudioAction[
   const actions: PreparedStudioAction[] = [];
   for (const call of assistant.tool_calls || []) {
     const action = actionForTool(call.function.name);
-    if (!action) continue;
+    if (!action) throw new Error(`The copilot requested an unavailable tool: ${call.function.name}. That tool call was not executed.`);
     const params = paramsOf(call);
     actions.push({
       call,
@@ -99,13 +100,26 @@ Navigating is free and expected: call app.set_mode to open a screen, then use th
           : ""
       }
 
-For a one-shot image, audio, or video generation from any mode, call jobs_submit. Never print a {"job": ...} plan as assistant text: that does not execute anything. jobs_submit is paid and the client will require the user's confirmation before it runs.
+For an explicit request to tell, ask, have or delegate work to a hosted agent, use agents_delegate when advertised. agents_list can discover this owner's agents. Preserve the complete user goal and its clarification; if a target is ambiguous, let the user select it. Never substitute a generation job for an explicit hosted-agent request. agents_delegate only prepares a task for the SAME hosted-agent UI confirmation: a result with prepared:true and confirmation_required:true means no task has run yet. Report it as prepared for review, never completed, and stop until that confirmation.
+
+When jobs_submit is advertised, it can run one paid generation job using ONLY an exact model/endpoint pair and parameter schema in that tool. If no live matching endpoint is advertised, explain that it is unavailable. For video, offer local Blender authoring by a hosted agent as an explicit alternative; never claim it has started. Do not invent model names, tool names, endpoints, credentials or capabilities. Never print a {"job": ...} plan as assistant text: that does not execute anything. Paid generation and hosted-agent tasks require their own explicit user confirmation before they run.
 
 ${digest(context.mode, context.board, context.media || null)}`,
     },
     ...(context.history || []).filter((message) => message.role !== "system").slice(-30),
     { role: "user", content: userText },
   ];
+  const delegatedTask = hostedAgentRequest(userText, context.history);
+  if (delegatedTask) {
+    if (actionForTool("agents_delegate")?.name !== "agents.delegate") {
+      throw new Error("Hosted-agent delegation is unavailable. Open Agents to check your agent's setup; no generation job was started.");
+    }
+    const assistant: ChatAssistantMessage = { role: "assistant", content: null, tool_calls: [{
+      id: `hosted-${crypto.randomUUID()}`, type: "function",
+      function: { name: "agents_delegate", arguments: JSON.stringify({ task: delegatedTask }) },
+    }] };
+    return { messages, assistant, actions: preparedActions(assistant) };
+  }
   const assistant = await chatCompletionMessage(apiKey, messages, { tools: actionTools(), toolChoice: "auto" });
   return { messages, assistant, actions: preparedActions(assistant) };
 }
@@ -146,6 +160,26 @@ export async function executeStudioAction(action: PreparedStudioAction): Promise
   }
 }
 
+const PREPARED_TASK_MESSAGE = "The hosted-agent task is prepared for review and has not run. Review the selected agent and task, then confirm it in Agents.";
+const FAILED_TASK_MESSAGE = "The hosted-agent task could not be prepared. Check the selected agent's status and setup in Agents before trying again. No substitute generation job was started.";
+
+function hostedTaskResultMessage(results: StudioActionResult[]): string | null {
+  if (!results.some((result) => result.action.actionName === "agents.delegate")) return null;
+  return hasPreparedHostedTask(results) ? PREPARED_TASK_MESSAGE : FAILED_TASK_MESSAGE;
+}
+
+function hasPreparedHostedTask(results: StudioActionResult[]): boolean {
+  return results.some((result) => {
+    if (result.error || result.action.actionName !== "agents.delegate") return false;
+    try {
+      const value: unknown = JSON.parse(result.message.content);
+      return !!value && typeof value === "object" && !Array.isArray(value)
+        && "prepared" in value && value.prepared === true
+        && "confirmation_required" in value && value.confirmation_required === true;
+    } catch { return false; }
+  });
+}
+
 export async function continueStudioAgentTurn(
   apiKey: string,
   turn: StudioAgentTurn,
@@ -156,6 +190,12 @@ export async function continueStudioAgentTurn(
     turn.assistant,
     ...results.map((result) => result.message),
   ];
+  const hostedMessage = hostedTaskResultMessage(results);
+  if (hostedMessage) return {
+    messages,
+    assistant: { role: "assistant", content: hostedMessage },
+    actions: [],
+  };
   const assistant = await chatCompletionMessage(apiKey, messages, { tools: actionTools(), toolChoice: "auto" });
   return { messages, assistant, actions: preparedActions(assistant) };
 }
@@ -165,6 +205,8 @@ export async function finishStudioAgentTurn(
   turn: StudioAgentTurn,
   results: StudioActionResult[],
 ): Promise<string> {
+  const hostedMessage = hostedTaskResultMessage(results);
+  if (hostedMessage) return hostedMessage;
   const response = await chatCompletionMessage(
     apiKey,
     [...turn.messages, turn.assistant, ...results.map((result) => result.message)],

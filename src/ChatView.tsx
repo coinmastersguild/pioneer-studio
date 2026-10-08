@@ -10,6 +10,8 @@ import SkeletonCard from "./SkeletonCard";
 import { FLOWS, flowById, flowIsLive, matchFlow, wantsSkeleton, type Flow } from "./flows";
 import { clearPendingJob, loadPendingJobs, resumePendingJob } from "./pendingJobs";
 import { ChatRunTracker, type ChatRunStage } from "./chatActivity";
+import { hostedAgentRequest, unavailableVideoRequest } from "./hostedAgentDelegation";
+import { callAction } from "./control";
 import { prepareGenerationJob, runGenerationJob } from "./generationJob";
 import { IcCopy, IcImage, IcMusic, IcPlay, IcSend, IcSpark, kindOf, sleep, type PS } from "./shared";
 
@@ -30,7 +32,8 @@ type JobInfo = {
 };
 type Part =
   | { id: number; type: "text"; text: string }
-  | { id: number; type: "plan"; plan: PlanInfo }
+  | { id: number; type: "plan"; plan: PlanInfo; review: "pending" | "submitted" | "cancelled" }
+  | { id: number; type: "agent-offer"; task: string; prepared: boolean }
   | { id: number; type: "job"; job: JobInfo }
   | { id: number; type: "flow"; flowId: string }
   | { id: number; type: "skeleton" }
@@ -119,6 +122,8 @@ export default function ChatView({ ps, active = true }: { ps: PS; active?: boole
   const box = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const nextId = useRef(1);
+  const generationReviews = useRef(new Map<number, () => Promise<void>>());
+  useEffect(() => { generationReviews.current.clear(); return () => generationReviews.current.clear(); }, [ps.apiKey]);
   // the interview so far — the copilot keeps asking until it has enough, so it
   // has to see what it already asked and what was answered
   const historyRef = useRef<ChatMessage[]>([]);
@@ -261,6 +266,15 @@ export default function ChatView({ ps, active = true }: { ps: PS; active?: boole
   const openSkeletonRef = useRef(openSkeleton);
   openSkeletonRef.current = openSkeleton;
 
+  async function delegateTask(goal: string, aiTurn = addTurn("ai")) {
+    try {
+      const result = await callAction("agents.delegate", { task: goal }) as { prepared?: boolean; confirmation_required?: boolean };
+      if (result.prepared !== true || result.confirmation_required !== true) throw new Error("Task review was not prepared.");
+      addPart(aiTurn, { type: "text", text: "Task prepared in Agents. Review the selected agent and confirm before it starts; no task has been sent yet." } as NewPart);
+      historyRef.current = [...historyRef.current, { role: "user", content: goal }, { role: "assistant", content: "Task prepared for owner review." }].slice(-12) as ChatMessage[];
+    } catch (error) { addPart(aiTurn, { type: "text", text: error instanceof Error ? error.message : "Open Agents and select your intended runnable agent." } as NewPart); }
+  }
+
   async function fire(input: string) {
     const p = psRef.current;
     const t = (input || "").trim();
@@ -268,6 +282,12 @@ export default function ChatView({ ps, active = true }: { ps: PS; active?: boole
     setText("");
     if (box.current) box.current.style.height = "auto";
     addTurn("user", [{ id: nextId.current++, type: "text", text: t }]);
+    const delegated = hostedAgentRequest(t, historyRef.current);
+    if (delegated) { await delegateTask(delegated); return; }
+    if (unavailableVideoRequest(t, p.models, p.catalogAvailable)) {
+      const ai = addTurn("ai", [{ id: nextId.current++, type: "text", text: "No live video generation endpoint is available. You can ask your selected hosted agent to discover its local Blender animation tools and save an MP4 plus the editable scene." }]);
+      addPart(ai, { type: "agent-offer", task: t, prepared: false } as NewPart); return;
+    }
     if (/\b(loop|keep (going|trying)|until (it|its|it's)? ?(right|good|done)|iterate|refine until|work on (it|this) until)\b/i.test(t)) {
       await openLoop(t);
       return;
@@ -301,7 +321,7 @@ export default function ChatView({ ps, active = true }: { ps: PS; active?: boole
       const brief = boardBrief(p.board, p.board ? loadPipeline(p.board.id) : null);
       const plan = await requestJobPlan(p.apiKey, p.models, mediaObjects, t, brief, historyRef.current);
       historyRef.current = [...historyRef.current, { role: "user" as const, content: t }].slice(-12);
-      if (plan.say) await streamText(aiTurn, plan.say);
+      if (!plan.job && !plan.flow && plan.say) await streamText(aiTurn, plan.say);
 
       // still gathering — put the question on screen and wait for the answer
       if (plan.ask) {
@@ -314,7 +334,8 @@ export default function ChatView({ ps, active = true }: { ps: PS; active?: boole
         if (plan.flow === "skeleton") await openSkeleton();
         else {
           const f = flowById(plan.flow);
-          if (f) addPart(aiTurn, { type: "flow", flowId: f.id } as NewPart);
+          if (f && flowIsLive(f, p.models)) addPart(aiTurn, { type: "flow", flowId: f.id } as NewPart);
+          else addPart(aiTurn, { type: "text", text: "That flow is unavailable in the live catalog. No generation was started." } as NewPart);
         }
         return;
       }
@@ -332,38 +353,53 @@ export default function ChatView({ ps, active = true }: { ps: PS; active?: boole
         .filter(([k]) => k !== "prompt" && k !== "prompts" && k !== "lyrics")
         .map(([k, v]) => [k, Array.isArray(v) ? `${v.length}×` : String(v).slice(0, 34)] as [string, string]);
       if (typeof params.prompt === "string") paramPairs.unshift(["prompt", `${params.prompt.slice(0, 42)}…`]);
-      addPart(aiTurn, {
-        type: "plan",
+      const reviewPart = addPart(aiTurn, {
+        type: "plan", review: "pending",
         plan: { model, endpoint, params: paramPairs, refs: injectedRefs(endpoint, refs).map((r) => r.name), cost },
       } as NewPart);
-      await sleep(500);
+      generationReviews.current.set(reviewPart, async () => {
+        if (psRef.current.apiKey !== p.apiKey) throw new Error("Account changed. Prepare this request again from the intended account.");
+        const current = psRef.current;
+        if (!current.catalogAvailable) throw new Error("The live catalog is unavailable. No generation was started.");
+        const fresh = prepareGenerationJob(current.models, current.media, request);
+        if (fresh.entry.credits !== cost || JSON.stringify(fresh.params) !== JSON.stringify(params)) throw new Error("The reviewed price or parameters changed. Prepare a new review.");
+        patchPart(aiTurn, reviewPart, { review: "submitted" } as PartPatch);
+        startRun(runId);
+        try {
 
-      const { submission: res, url, contentType } = await runGenerationJob(p, request, t, () => {
-        jobPart = addPart(aiTurn, {
-          type: "job",
-          job: { status: "queued", model, endpoint },
-        } as NewPart);
-        setRunStage(runId, "running");
-        runTimer = setTimeout(() => patchPart(aiTurn, jobPart, { job: { status: "running", model, endpoint } } as PartPatch), 3200);
+          const { submission: res, url, contentType } = await runGenerationJob(current, request, t, () => {
+            jobPart = addPart(aiTurn, {
+              type: "job",
+              job: { status: "queued", model, endpoint },
+            } as NewPart);
+            setRunStage(runId, "running");
+            runTimer = setTimeout(() => patchPart(aiTurn, jobPart, { job: { status: "running", model, endpoint } } as PartPatch), 3200);
+          });
+          clearTimeout(runTimer);
+          const kind = kindOf(contentType, url);
+          patchPart(aiTurn, jobPart, { job: { status: "done", model, endpoint, url, kind } } as PartPatch);
+          const secs = ((Date.now() - started) / 1000).toFixed(1);
+          await streamText(
+            aiTurn,
+            `Done — ${res.credits_charged} cr, ${secs}s. Saved to Media with a public R2 URL — share it or feed it into the next job.`,
+          );
+          historyRef.current = [...historyRef.current, { role: "assistant" as const, content: `I rendered: ${t}` }].slice(-12);
+          // look at what came back and say whether it is what was asked for
+          if (kind === "image") {
+            setRunStage(runId, "reviewing the result");
+            const c = await critiqueResult(p.apiKey, t, url).catch(() => null);
+            if (c) {
+              await streamText(aiTurn, c.ok ? `Checked it: ${c.notes}` : `That missed something — ${c.notes}`);
+              if (c.fix) addPart(aiTurn, { type: "fix", intent: t, url, notes: c.notes, fix: c.fix, applied: false } as NewPart);
+            }
+          }
+        } catch (error) {
+          clearTimeout(runTimer);
+          if (jobPart) patchPart(aiTurn, jobPart, { job: { status: "failed", model, endpoint, error: error instanceof Error ? error.message : "Generation did not complete." } } as PartPatch);
+          addPart(aiTurn, { type: "text", text: error instanceof Error ? error.message : "Generation did not complete. Inspect its status before trying again." } as NewPart);
+        } finally { finishRun(runId); }
       });
-      clearTimeout(runTimer);
-      const kind = kindOf(contentType, url);
-      patchPart(aiTurn, jobPart, { job: { status: "done", model, endpoint, url, kind } } as PartPatch);
-      const secs = ((Date.now() - started) / 1000).toFixed(1);
-      await streamText(
-        aiTurn,
-        `Done — ${res.credits_charged} cr, ${secs}s. Saved to Media with a public R2 URL — share it or feed it into the next job.`,
-      );
-      historyRef.current = [...historyRef.current, { role: "assistant" as const, content: `I rendered: ${t}` }].slice(-12);
-      // look at what came back and say whether it is what was asked for
-      if (kind === "image") {
-        setRunStage(runId, "reviewing the result");
-        const c = await critiqueResult(p.apiKey, t, url).catch(() => null);
-        if (c) {
-          await streamText(aiTurn, c.ok ? `Checked it: ${c.notes}` : `That missed something — ${c.notes}`);
-          if (c.fix) addPart(aiTurn, { type: "fix", intent: t, url, notes: c.notes, fix: c.fix, applied: false } as NewPart);
-        }
-      }
+      return;
     } catch (e: any) {
       clearTimeout(runTimer);
       const error = String(e.message || e);
@@ -533,6 +569,9 @@ export default function ChatView({ ps, active = true }: { ps: PS; active?: boole
                     const f = flowById(part.flowId);
                     return f ? <FlowCard key={part.id} flow={f} ps={ps} /> : null;
                   }
+                  if (part.type === "agent-offer") return <button key={part.id} className="btn" disabled={part.prepared} onClick={() => {
+                    patchPart(turn.id, part.id, { prepared: true } as PartPatch); void delegateTask(part.task, turn.id);
+                  }}>Use hosted agent</button>;
                   if (part.type === "plan") {
                     const pl = part.plan;
                     return (
@@ -581,11 +620,12 @@ export default function ChatView({ ps, active = true }: { ps: PS; active?: boole
                           </div>
                         </div>
                         <div className="plan-foot">
-                          <span style={{ fontSize: 11.5, color: "var(--fg3)" }}>Auto-selected from your prompt</span>
-                          <span className="queued">
-                            <span className="d" style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--compass-400)" }} />
-                            queued
-                          </span>
+                          <span style={{ fontSize: 11.5, color: "var(--fg3)" }}>{part.review === "pending" ? "Review the live endpoint, parameters and price before spending." : part.review === "cancelled" ? "Cancelled; no generation submitted." : "Request confirmed."}</span>
+                          {part.review === "pending" && <><button className="btn" onClick={() => {
+                            const run = generationReviews.current.get(part.id); generationReviews.current.delete(part.id);
+                            if (run) { patchPart(turn.id, part.id, { review: "submitted" } as PartPatch); void run().catch((error) => addPart(turn.id, { type: "text", text: String(error.message || error) } as NewPart)); }
+                          }}>Confirm generation</button><button className="btn" onClick={() => { generationReviews.current.delete(part.id); patchPart(turn.id, part.id, { review: "cancelled" } as PartPatch); }}>Cancel generation</button></>}
+                          <span>{part.review === "pending" ? "Confirmation required" : part.review}</span>
                         </div>
                       </div>
                     );

@@ -104,6 +104,24 @@ and recent operation metadata, with confirmed pause/resume controls. Pausing doe
 not erase facts, and memory computation is not included in displayed inference
 token usage. Fact browsing, export and deletion are unavailable.
 
+Ask Copilot to **tell the agent** what to make to open the selected owner's task
+review, rather than planning a generation job. When more than one agent is
+available, select the intended agent in **Agents** first. The task starts only
+after the owner confirms it. The main Chat and global Copilot use that same
+confirmation, conversation and interruption recovery path. Available media jobs
+also require a reviewed model, parameters and price before **Confirm generation**.
+Unavailable endpoints are not advertised as Copilot tools or substituted.
+
+Video tasks in Copilot and the Agents composer request a newly named MP4 and
+editable Blender source from the runtime's actual local tools. After the reply,
+Studio checks the owner's saved files for that task's exact names and offers a
+local preview and downloads. It never treats an old file, an arbitrary response
+URL or a PNG as the requested video. A saved container header is not playback
+proof: the viewer reports playable video only after the browser can play it with
+positive duration and dimensions. Review the content against your request;
+available tools may report a limitation instead of producing a video. Agent files
+stay private and are not automatically uploaded to public Media.
+
 An encrypted configuration lock does not disable local browser, file or Blender
 tools. Host memory additionally requires both configuration and an enabled policy.
 Conversation IDs remain stable per agent in the signed-in tab. Use **New

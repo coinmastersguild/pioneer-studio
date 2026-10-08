@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { WORKSPACE_GROUPS } from "./studioNavigation";
+import { hostedAgentRequest } from "./hostedAgentDelegation";
 import { dispatchWorkspaceInput } from "./workspaceInput";
 import { connectionReturn } from "./agentConnectionState";
 import type { WalletOption } from "./wallets";
@@ -48,7 +49,7 @@ import {
   type PS,
   type Suggestion,
 } from "./shared";
-import { clearActions, registerActions } from "./control";
+import { callAction, clearActions, registerActions } from "./control";
 import SignInForm from "./SignInForm";
 import { clearWalletSession, rememberWalletPreference, restoreWalletSession, saveWalletSession, setRememberWalletPreference, type WalletSession } from "./authSession";
 import { createGenerationAction } from "./generationJob";
@@ -632,6 +633,17 @@ function App() {
     const key = apiKeyRef.current;
     const epoch = accountEpochRef.current;
     setChatText("");
+    const delegated = mode !== "agents" && hostedAgentRequest(v, agentHistoryRef.current);
+    if (delegated && mode !== "chat") {
+      addMsg("You", v); busyRef.current = true;
+      try {
+        const result = await callAction("agents.delegate", { task: delegated }) as { prepared?: boolean; confirmation_required?: boolean };
+        if (result.prepared !== true || result.confirmation_required !== true) throw new Error("Task review was not prepared.");
+        if (epoch === accountEpochRef.current) addMsg("Copilot", "Task prepared in Agents. Review and confirm it before it starts; no task has been sent yet.");
+      } catch (error) { if (epoch === accountEpochRef.current) addMsg("Copilot", error instanceof Error ? error.message : "Select your intended runnable agent in Agents."); }
+      finally { if (epoch === accountEpochRef.current) busyRef.current = false; }
+      return;
+    }
     const routed = dispatchWorkspaceInput(mode, v, inputHandlers.current);
     if (routed !== "copilot") {
       if (routed === "unavailable") toast("This workspace is not ready yet. Reopen it and try again.");

@@ -7,6 +7,9 @@ import AgentConnections from "./AgentConnections";
 import { agentDesktopReady, desktopSocket, unlockKey, type DesktopSocket } from "./agentRuntime";
 import AgentDesktop from "./AgentDesktop";
 import AgentWorkspace from "./AgentWorkspace";
+import AgentTaskArtifacts from "./AgentTaskArtifacts";
+import { registerActions } from "./control";
+import { prepareHostedAgentTask } from "./hostedAgentDelegation";
 import AgentMemoryPanel from "./AgentMemoryPanel";
 import { inspectAgentTurnRecovery, confirmAgentTurnRecovery } from "./agentTurnRecovery";
 import { AgentConversations, desktopRuntimeChanged, desktopRuntimeUnavailable, type DesktopRuntimeBinding } from "./agentConversation";
@@ -15,7 +18,7 @@ import { connectionReturn, connectionAvailabilityError, verifyAgentGithubSetup, 
 import { agentReplyPlaceholder, observeAgentReply, type AgentReplyState } from "./agentReply";
 import "./agentChat.css";
 
-type Entry = { id: string; role: "user" | "agent" | "studio"; text: string; replyState?: AgentReplyState };
+type Entry = { id: string; role: "user" | "agent" | "studio"; text: string; replyState?: AgentReplyState; outputPrefix?: string };
 const EMPTY_ENTRIES: Entry[] = [];
 type Editor = { path: string; content: string; agentId: string; area: AgentFileArea };
 type Confirmation = { title: string; detail: string; restoreText?: string; confirmLabel?: string; run: () => Promise<void> };
@@ -233,7 +236,9 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
   }, [ps.apiKey, selected, setupRequired, desktopOpen]);
 
   async function verifyRequiredSetup(key: string, id: string, signal: AbortSignal) {
-    const detail = await agentRequest<{ agent: HostedAgent }>(key, `/${encodeURIComponent(id)}`, { signal });
+    const detail = await agentRequest<{ agent: HostedAgent; pending_operation_id?: string | null }>(key, `/${encodeURIComponent(id)}`, { signal });
+    if (detail.agent.id !== id || detail.agent.status !== "running" || detail.agent.pending_operation_id || detail.pending_operation_id)
+      throw new Error("The selected agent must still be running without a pending operation. No task was sent.");
     if (!agentRequiresGithub(detail.agent, requiredSetupRef.current)) return;
     if (detail.agent.setup_state !== undefined && detail.agent.setup_state !== "ready")
       throw new Error("Complete required GitHub setup before sending this agent a task.");
@@ -424,19 +429,21 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
       if (desktopController.current === abort) { desktopController.current = null; setDesktopBusy(false); }
     }
   }
-  async function submit(value = input) {
-    const text = value.trim(); if (!text || busy || connectionsOpen || confirmation || retryUntil > Date.now()) return;
+  async function submit(value = input): Promise<boolean> {
+    const raw = value.trim(); let text = raw; if (!text || busy || connectionsOpen || confirmation || retryUntil > Date.now()) return false;
     const parsed = parseAgentCommand(text);
-    if (parsed) { setInput(""); say(text, "user"); await guarded((key, signal) => command(parsed.name, parsed.argument, key, signal)); return; }
-    if (text.startsWith("/")) { say("Unknown command. Use /help for Studio commands."); return; }
-    if (!agent) { setCreate(true); say("Create an agent, then send it a task."); return; }
-    if (pending || agent.status !== "running") { setError("The agent must be running with no pending operations before sending a task."); return; }
+    if (parsed) { setInput(""); say(text, "user"); await guarded((key, signal) => command(parsed.name, parsed.argument, key, signal)); return false; }
+    if (text.startsWith("/")) { say("Unknown command. Use /help for Studio commands."); return false; }
+    if (!agent) { setCreate(true); say("Create an agent, then send it a task."); return false; }
+    if (pending || agent.status !== "running") { setError("The agent must be running with no pending operations before sending a task."); return false; }
     const id = agent.id; const agentName = agent.name;
-    if (conversations.current.needsReview(id)) { setError("The previous reply was not completed. Review this agent's status, files and logs before continuing this conversation."); return; }
+    const outputPrefix = /\b(?:video|movie|animation|animate|animated|clip)\b/i.test(raw) ? `studio-${crypto.randomUUID()}` : undefined;
+    if (outputPrefix) { try { text = prepareHostedAgentTask(raw, outputPrefix); } catch (error) { report(error); return false; } }
+    if (conversations.current.needsReview(id)) { setError("The previous reply was not completed. Review this agent's status, files and logs before continuing this conversation."); return false; }
     if (setupRequired) {
       let ready = false;
       await guarded(async (key, signal) => { await verifyRequiredSetup(key, id, signal); ready = !signal.aborted; });
-      if (!ready) { setConnectionsOpen(true); return; }
+      if (!ready) { setConnectionsOpen(true); return false; }
     }
     setInput("");
     setConfirmation({ title: `Send task to ${agentName}`, restoreText: text, detail: `This spends prepaid tokens and may cause the agent to act on its workspace and connected accounts.\n\n${text}`,
@@ -455,17 +462,52 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
             if (!signal.aborted && activeKey.current === key) setEntries((prev) => prev.map((e) => e.id === replyId ? { ...e, replyState } : e));
           });
           completed = true;
+          if (!signal.aborted && activeKey.current === key) {
+            setFilesOpen(true);
+            if (outputPrefix) setEntries((prev) => prev.map((entry) => entry.id === replyId ? { ...entry, outputPrefix } : entry));
+          }
         } finally {
           conversation.finish(id, completed);
           if (!signal.aborted && activeKey.current === key) await refresh(key, signal).catch(() => { setMonitorError("Budget refresh unavailable; retaining the last observation."); });
         }
       }) });
+    return true;
   }
   const submitRef = useRef(submit);
   submitRef.current = submit;
+  const preparingDelegation = useRef(false);
+  useEffect(() => { if (!confirmation) preparingDelegation.current = false; }, [confirmation]);
+  const delegationState = useRef({ ps, agents, selected, busy, pending, confirmation, connectionsOpen, runtimeReady, liveAvailable });
+  delegationState.current = { ps, agents, selected, busy, pending, confirmation, connectionsOpen, runtimeReady, liveAvailable };
+  useEffect(() => {
+    const ownerSession = authSession.current.id;
+    registerActions([
+      { name: "agents.list", description: "List this signed-in owner's hosted agents and their selected/runnable status. Does not execute a task.", run: () => {
+        const state = delegationState.current;
+        if (ownerSession !== authSession.current.id || !state.ps.apiKey) throw new Error("Sign in and reopen your agent list.");
+        return { agents: state.agents.filter((item) => item.status !== "deleted").map((item) => ({ id: item.id, name: item.name, status: item.status, selected: item.id === state.selected, runnable: item.id === state.selected && state.runtimeReady && state.liveAvailable })) };
+      } },
+      { name: "agents.delegate", description: "Prepare a task for the owner's currently selected hosted agent. Opens its existing task review; explicit owner confirmation is required before tokens are spent. Use available local Blender/browser tools, not a media model endpoint.",
+        parameters: { type: "object", properties: { task: { type: "string" }, agent_id: { type: "string", description: "Optional ID, which must match the owner's currently selected agent" } }, required: ["task"], additionalProperties: false },
+        run: async (params) => {
+          const state = delegationState.current;
+          if (ownerSession !== authSession.current.id || !state.ps.apiKey || !params || Object.keys(params).some((key) => !["task", "agent_id"].includes(key)) || typeof params.task !== "string") throw new Error("A signed-in owner and a valid task are required.");
+          const target = state.agents.find((item) => item.id === state.selected);
+          if (!target || (params.agent_id !== undefined && params.agent_id !== target.id)) throw new Error("Select your own intended agent in Agents before delegating. No task was sent.");
+          if (!state.runtimeReady || !state.liveAvailable || state.busy || state.pending || state.confirmation || preparingDelegation.current || state.connectionsOpen || conversations.current.needsReview(target.id)) throw new Error("The selected agent is not ready for a new task. Review its setup, status and previous work in Agents.");
+          preparingDelegation.current = true;
+          let prepared = false;
+          try { prepareHostedAgentTask(params.task); prepared = await submitRef.current(params.task); }
+          catch (error) { preparingDelegation.current = false; throw error; }
+          if (!prepared || ownerSession !== authSession.current.id) { preparingDelegation.current = false; throw new Error("The task was not prepared. Review the selected agent in Agents."); }
+          state.ps.setMode("agents");
+          return { prepared: true, confirmation_required: true, agent_id: target.id, name: target.name };
+        } },
+    ]);
+  }, [ps.apiKey]);
   useEffect(() => {
     if (!active) return;
-    ps.setInputHandler("agents", (text) => { void submitRef.current(text); });
+    ps.setInputHandler("agents", (text) => submitRef.current(text));
     ps.registerSuggestions("agents", ["/claim", "/github", "/status", "/edit SOUL.md", "/files", "/usage"].map((text) => ({ label: text, run: () => { void submitRef.current(text); } })));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
@@ -517,6 +559,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
         <div className="agent-shortcuts">{["claim", "status", "github", "files", "memory", "logs", "usage", "help"].map((c) => <button className="btn" key={c} disabled={busy || !!confirmation || !!editor || connectionsOpen} onClick={() => { void guarded((key, signal) => command(c, "", key, signal)); }}>{`/${c}`}</button>)}</div>
       </div>}
       {entries.map((entry) => <div className={`agent-entry ${entry.role}`} key={entry.id}><small>{entry.role === "user" ? "You" : entry.role === "agent" ? "Agent" : "Studio"}</small><pre>{entry.text || agentReplyPlaceholder(entry.replyState)}</pre>
+        {entry.outputPrefix && agent && <AgentTaskArtifacts key={`${authSession.current.id}:${agent.id}:${entry.outputPrefix}`} apiKey={ps.apiKey} agentId={agent.id} prefix={entry.outputPrefix} />}
         {entry.replyState === "streaming" && <p role="status">Tool work may take up to 15 minutes. Replies arrive as completed content, rather than a live tool or token feed. Watch the desktop or runtime logs for progress.</p>}</div>)}
       {followingLogs && <div className="agent-card"><h3>Live runtime logs</h3><pre>{logs.join("\n") || "Awaiting runtime logs…"}</pre></div>}
       {monitorError && <p role="status">{monitorError}</p>}
