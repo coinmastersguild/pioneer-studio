@@ -161,6 +161,12 @@ export async function executeStudioAction(action: PreparedStudioAction): Promise
 }
 
 const PREPARED_TASK_MESSAGE = "The hosted-agent task is prepared for review and has not run. Review the selected agent and task, then confirm it in Agents.";
+const FAILED_TASK_MESSAGE = "The hosted-agent task could not be prepared. Check the selected agent's status and setup in Agents before trying again. No substitute generation job was started.";
+
+function hostedTaskResultMessage(results: StudioActionResult[]): string | null {
+  if (!results.some((result) => result.action.actionName === "agents.delegate")) return null;
+  return hasPreparedHostedTask(results) ? PREPARED_TASK_MESSAGE : FAILED_TASK_MESSAGE;
+}
 
 function hasPreparedHostedTask(results: StudioActionResult[]): boolean {
   return results.some((result) => {
@@ -184,9 +190,10 @@ export async function continueStudioAgentTurn(
     turn.assistant,
     ...results.map((result) => result.message),
   ];
-  if (hasPreparedHostedTask(results)) return {
+  const hostedMessage = hostedTaskResultMessage(results);
+  if (hostedMessage) return {
     messages,
-    assistant: { role: "assistant", content: PREPARED_TASK_MESSAGE },
+    assistant: { role: "assistant", content: hostedMessage },
     actions: [],
   };
   const assistant = await chatCompletionMessage(apiKey, messages, { tools: actionTools(), toolChoice: "auto" });
@@ -198,7 +205,8 @@ export async function finishStudioAgentTurn(
   turn: StudioAgentTurn,
   results: StudioActionResult[],
 ): Promise<string> {
-  if (hasPreparedHostedTask(results)) return PREPARED_TASK_MESSAGE;
+  const hostedMessage = hostedTaskResultMessage(results);
+  if (hostedMessage) return hostedMessage;
   const response = await chatCompletionMessage(
     apiKey,
     [...turn.messages, turn.assistant, ...results.map((result) => result.message)],
