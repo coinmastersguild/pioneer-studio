@@ -82,6 +82,31 @@ test("the app copilot stages explicit delegation through advertised hosted-agent
   } finally { globalThis.fetch = original; }
 });
 
+test("all Copilot callers stop at hosted-agent preparation instead of asking the model to claim completion", async () => {
+  clearActions();
+  registerActions([{ name: "agents.delegate", description: "Prepare a task", run: () => ({ prepared: true, confirmation_required: true }) }]);
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    return new Response(JSON.stringify({ choices: [{ message: calls === 1
+      ? { content: null, tool_calls: [{ id: "prepared", type: "function", function: { name: "agents_delegate", arguments: '{"task":"make a cat video"}' } }] }
+      : { content: "The video is done." },
+    }] }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const turn = await beginStudioAgentTurn("test-key", "tell the agent to make a cat video", { mode: "head", board: null });
+    const result = await executeStudioAction(turn.actions[0]);
+    const next = await continueStudioAgentTurn("test-key", turn, [result]);
+    expect(calls).toBe(1);
+    expect(next.actions).toHaveLength(0);
+    expect(next.assistant.content).toContain("not run");
+    expect(next.assistant.content).toContain("confirm");
+    expect(await finishStudioAgentTurn("test-key", turn, [result])).toContain("not run");
+    expect(calls).toBe(1);
+  } finally { globalThis.fetch = original; }
+});
+
 test("agent turns retain history and continue through multiple action rounds", async () => {
   let total = 0;
   registerActions([
