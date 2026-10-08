@@ -1,5 +1,6 @@
 import { walletSessionFromResponse, type WalletSession } from "./authSession";
 import type { WalletOption } from "./wallets";
+import { agentErrorDetails } from "./agentReply";
 /** Public, metered Pioneer API. Users provide their own credential at runtime. */
 export const API_BASE = "https://alpha.pioneers.dev";
 
@@ -140,8 +141,8 @@ async function checkAgentResponse(res: Response): Promise<void> {
   const retry = res.headers.get("Retry-After");
   const seconds = retry === null ? NaN : Number(retry);
   const retryAfter = retry === null ? null : Number.isFinite(seconds) ? seconds : Math.max(0, (Date.parse(retry) - Date.now()) / 1000);
-  throw new AgentApiError(body?.error?.message || `Agent request failed (${res.status})`, res.status,
-    body?.error?.code || "request_failed", Number.isFinite(retryAfter) ? retryAfter : null);
+  const failure = agentErrorDetails(body, `Agent request failed (${res.status})`, "request_failed", res.status);
+  throw new AgentApiError(failure.message, res.status, failure.code, Number.isFinite(retryAfter) ? retryAfter : null);
 }
 
 export async function agentRequest<T>(apiKey: string, suffix: string, init: RequestInit = {}): Promise<T> {
@@ -209,41 +210,98 @@ export function validateAgentPath(path: string, allowRoot = false): string {
   return path;
 }
 
-export async function readAgentFile(apiKey: string, id: string, path: string, signal?: AbortSignal): Promise<string> {
-  const query = new URLSearchParams({ path: validateAgentPath(path), download: "true" });
+export type AgentFileArea = "workspace" | "projects";
+const AGENT_FILE_BYTES = 10 * 1024 * 1024;
+function agentFileQuery(path: string, area: AgentFileArea, download = false): URLSearchParams {
+  if (area !== "workspace" && area !== "projects") throw new Error("Use the workspace or projects file area.");
+  const query = new URLSearchParams({ path: validateAgentPath(path) });
+  if (download) query.set("download", "true");
+  if (area !== "workspace") query.set("area", area);
+  return query;
+}
+
+export async function readAgentFile(apiKey: string, id: string, path: string, signal?: AbortSignal, area: AgentFileArea = "workspace"): Promise<string> {
+  const query = agentFileQuery(path, area, true);
   const res = await apiFetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(id)}/files?${query}`, { headers: authHeaders(apiKey), signal });
   await checkAgentResponse(res);
   return res.text();
 }
 
-export async function writeAgentFile(apiKey: string, id: string, path: string, content: string, signal?: AbortSignal) {
-  if (new TextEncoder().encode(content).length > 10_000_000) throw new Error("File exceeds 10 MB.");
-  return agentRequest<{ written: boolean }>(apiKey, `/${encodeURIComponent(id)}/files?${new URLSearchParams({ path: validateAgentPath(path) })}`, {
+/** Artifact downloads must preserve binary bytes and bound the actual transfer. */
+export async function downloadAgentFile(apiKey: string, id: string, path: string, signal?: AbortSignal, area: AgentFileArea = "workspace"): Promise<Blob> {
+  const query = agentFileQuery(path, area, true);
+  const res = await apiFetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(id)}/files?${query}`, { headers: authHeaders(apiKey), signal });
+  await checkAgentResponse(res);
+  if (Number(res.headers.get("Content-Length")) > AGENT_FILE_BYTES) {
+    void res.body?.cancel().catch(() => {});
+    throw new Error("File exceeds 10 MiB.");
+  }
+  if (!res.body) return new Blob([], { type: res.headers.get("Content-Type") || "application/octet-stream" });
+  const reader = res.body.getReader();
+  const parts: BlobPart[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > AGENT_FILE_BYTES) throw new Error("File exceeds 10 MiB.");
+      parts.push(new Uint8Array(value));
+    }
+    return new Blob(parts, { type: res.headers.get("Content-Type") || "application/octet-stream" });
+  } finally { void reader.cancel().catch(() => {}); reader.releaseLock(); }
+}
+
+export async function writeAgentFile(apiKey: string, id: string, path: string, content: string, signal?: AbortSignal, area: AgentFileArea = "workspace") {
+  if (new TextEncoder().encode(content).length > AGENT_FILE_BYTES) throw new Error("File exceeds 10 MiB.");
+  return agentRequest<{ written: boolean }>(apiKey, `/${encodeURIComponent(id)}/files?${agentFileQuery(path, area)}`, {
     method: "PUT", headers: { "Content-Type": "text/plain; charset=utf-8" }, body: content, signal,
+  });
+}
+
+function waitForAgentTask<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    work.then((value) => { signal.removeEventListener("abort", abort); resolve(value); },
+      (error) => { signal.removeEventListener("abort", abort); reject(error); });
   });
 }
 
 /** No task replay: an interrupted stream may already have performed work. */
 export async function streamAgentMessage(apiKey: string, id: string, content: string, session: string,
-  onText: (text: string) => void, signal?: AbortSignal): Promise<void> {
-  const res = await apiFetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(id)}/messages`, {
-    method: "POST", headers: { ...authHeaders(apiKey), "Content-Type": "application/json" },
-    body: JSON.stringify({ content, session, stream: true }), signal,
-  });
-  await checkAgentResponse(res);
-  if (!res.headers.get("content-type")?.includes("text/event-stream")) {
-    const body = await res.json();
-    const reply = body?.choices?.[0]?.message?.content;
-    if (typeof reply !== "string") throw new Error("Agent returned an invalid reply.");
-    onText(reply); return;
-  }
-  if (!res.body) throw new Error("Agent stream has no body.");
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
+  onText: (text: string, mode?: "append" | "replace") => void, signal?: AbortSignal): Promise<void> {
+  // The service may spend 900 seconds on tool work. Keep one overall deadline,
+  // with transport grace; heartbeat comments neither end nor replay the turn.
+  const task = new AbortController();
+  const cancel = () => task.abort(signal?.reason);
+  if (signal?.aborted) cancel(); else signal?.addEventListener("abort", cancel, { once: true });
+  let timedOut = false;
+  const deadline = setTimeout(() => {
+    if (task.signal.aborted) return;
+    timedOut = true; task.abort(new Error("Agent task deadline exceeded"));
+  }, 930_000);
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
+    task.signal.throwIfAborted();
+    const res = await waitForAgentTask(apiFetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(id)}/messages`, {
+      method: "POST", headers: { ...authHeaders(apiKey), "Content-Type": "application/json" },
+      body: JSON.stringify({ content, session, stream: true }), signal: task.signal,
+    }), task.signal);
+    await waitForAgentTask(checkAgentResponse(res), task.signal);
+    if (!res.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) {
+      const body = await waitForAgentTask(res.json(), task.signal);
+      const reply = body?.choices?.[0]?.message?.content;
+      if (typeof reply !== "string") throw new Error("Agent returned an invalid reply.");
+      onText(reply, "replace"); return;
+    }
+    if (!res.body) throw new Error("Agent stream has no body.");
+    reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
     while (true) {
-      const { value, done } = await reader.read();
+      const { value, done } = await waitForAgentTask(reader.read(), task.signal);
       buffer += decoder.decode(value, { stream: !done });
       let boundary: RegExpExecArray | null;
       while ((boundary = /\r?\n\r?\n/.exec(buffer))) {
@@ -253,16 +311,28 @@ export async function streamAgentMessage(apiKey: string, id: string, content: st
         const data = lines.filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
         if (!data) continue;
         if (data === "[DONE]") return;
-        const payload = JSON.parse(data);
-        if (lines.some((line) => /^event:\s*error\s*$/.test(line)) || payload.error) {
-          throw new AgentApiError(payload.error?.message || payload.message || "Agent stream failed", 502, payload.error?.code || payload.code || "stream_error");
+        let payload;
+        try { payload = JSON.parse(data); }
+        catch { throw new AgentApiError("Agent stream returned invalid data. Check progress before sending again.", 502, "invalid_stream"); }
+        if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new AgentApiError("Agent stream returned invalid data. Check progress before sending again.", 502, "invalid_stream");
+        if (lines.some((line) => /^event:\s*error\s*$/.test(line)) || payload.error != null || payload.detail != null) {
+          const failure = agentErrorDetails(payload, "Agent stream failed", "stream_error", 502);
+          throw new AgentApiError(failure.message, failure.status, failure.code);
         }
+        const final = payload.choices?.[0]?.message?.content;
         const text = payload.choices?.[0]?.delta?.content;
-        if (typeof text === "string") onText(text);
+        if (typeof final === "string") onText(final, "replace");
+        else if (typeof text === "string") onText(text, "append");
       }
       if (done) throw new Error("Stream interrupted; the task may still be running. Check progress before sending again.");
     }
-  } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+  } catch (error) {
+    if (timedOut) throw new AgentApiError("Agent response timed out; the task may still be running. Check workspace files, status and logs before sending again.", 504, "task_timeout");
+    throw error;
+  } finally {
+    clearTimeout(deadline); signal?.removeEventListener("abort", cancel);
+    if (reader) { void reader.cancel().catch(() => {}); reader.releaseLock(); }
+  }
 }
 
 export class JobTerminalError extends Error {
