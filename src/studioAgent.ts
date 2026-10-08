@@ -63,7 +63,7 @@ function preparedActions(assistant: ChatAssistantMessage): PreparedStudioAction[
   const actions: PreparedStudioAction[] = [];
   for (const call of assistant.tool_calls || []) {
     const action = actionForTool(call.function.name);
-    if (!action) throw new Error(`The copilot requested an unavailable tool: ${call.function.name}. No action was executed.`);
+    if (!action) throw new Error(`The copilot requested an unavailable tool: ${call.function.name}. That tool call was not executed.`);
     const params = paramsOf(call);
     actions.push({
       call,
@@ -148,6 +148,20 @@ export async function executeStudioAction(action: PreparedStudioAction): Promise
   }
 }
 
+const PREPARED_TASK_MESSAGE = "The hosted-agent task is prepared for review and has not run. Review the selected agent and task, then confirm it in Agents.";
+
+function hasPreparedHostedTask(results: StudioActionResult[]): boolean {
+  return results.some((result) => {
+    if (result.error || result.action.actionName !== "agents.delegate") return false;
+    try {
+      const value: unknown = JSON.parse(result.message.content);
+      return !!value && typeof value === "object" && !Array.isArray(value)
+        && "prepared" in value && value.prepared === true
+        && "confirmation_required" in value && value.confirmation_required === true;
+    } catch { return false; }
+  });
+}
+
 export async function continueStudioAgentTurn(
   apiKey: string,
   turn: StudioAgentTurn,
@@ -158,6 +172,11 @@ export async function continueStudioAgentTurn(
     turn.assistant,
     ...results.map((result) => result.message),
   ];
+  if (hasPreparedHostedTask(results)) return {
+    messages,
+    assistant: { role: "assistant", content: PREPARED_TASK_MESSAGE },
+    actions: [],
+  };
   const assistant = await chatCompletionMessage(apiKey, messages, { tools: actionTools(), toolChoice: "auto" });
   return { messages, assistant, actions: preparedActions(assistant) };
 }
@@ -167,6 +186,7 @@ export async function finishStudioAgentTurn(
   turn: StudioAgentTurn,
   results: StudioActionResult[],
 ): Promise<string> {
+  if (hasPreparedHostedTask(results)) return PREPARED_TASK_MESSAGE;
   const response = await chatCompletionMessage(
     apiKey,
     [...turn.messages, turn.assistant, ...results.map((result) => result.message)],
