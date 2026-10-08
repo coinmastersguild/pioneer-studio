@@ -8,7 +8,7 @@ import { agentDesktopReady, desktopSocket, unlockKey, type DesktopSocket } from 
 import AgentDesktop from "./AgentDesktop";
 import AgentWorkspace from "./AgentWorkspace";
 import AgentMemoryPanel from "./AgentMemoryPanel";
-import { AgentConversations, desktopRuntimeChanged, type DesktopRuntimeBinding } from "./agentConversation";
+import { AgentConversations, desktopRuntimeChanged, desktopRuntimeUnavailable, type DesktopRuntimeBinding } from "./agentConversation";
 import { canEditWorkspaceFile, workspaceText, type AgentFileArea } from "./agentWorkspaceFiles";
 import { connectionReturn, connectionAvailabilityError, verifyAgentGithubSetup, connectionCapabilitiesMessage, agentRequiresGithub, agentGithubReady } from "./agentConnectionState";
 import { agentReplyPlaceholder, observeAgentReply, type AgentReplyState } from "./agentReply";
@@ -52,6 +52,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
   const [unlockDraft, setUnlockDraft] = useState("");
   const [desktop, setDesktop] = useState<DesktopSocket | null>(null);
   const desktopBinding = useRef<DesktopRuntimeBinding | null>(null);
+  const desktopOpen = desktop !== null;
   const [desktopBusy, setDesktopBusy] = useState(false);
   const desktopController = useRef<AbortController | null>(null);
   const [connectionFocus, setConnectionFocus] = useState(0);
@@ -214,7 +215,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
           const latestCatalog = await agentRequest<AgentCatalog>(key, "/catalog", { signal: abort.signal });
           if (!abort.signal.aborted) setCatalog(latestCatalog);
         }
-        if (setupRequired && selected && caps.github_read) {
+        if ((setupRequired || desktopOpen) && selected && caps.github_read) {
           const state = await agentRequest<AgentConnection>(key, `/${selected}/connections`, { signal: abort.signal });
           if (!abort.signal.aborted) setSetupConnection(state);
         } else setSetupConnection(null);
@@ -228,7 +229,7 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
     }
     void pollSetup();
     return () => { abort.abort(); clearTimeout(timer); };
-  }, [ps.apiKey, selected, setupRequired]);
+  }, [ps.apiKey, selected, setupRequired, desktopOpen]);
 
   async function verifyRequiredSetup(key: string, id: string, signal: AbortSignal) {
     const detail = await agentRequest<{ agent: HostedAgent }>(key, `/${encodeURIComponent(id)}`, { signal });
@@ -286,12 +287,13 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
   }, [selected, ps.apiKey]);
   useEffect(() => {
     if (!desktop || !desktopBinding.current) return;
-    if (desktopRuntimeChanged(desktopBinding.current, selected, setupConnection?.generation) || !desktopReady) {
+    if (desktopRuntimeChanged(desktopBinding.current, selected, setupConnection?.generation) ||
+        (agent && desktopRuntimeUnavailable(agent)) || ["revoked", "suspended"].includes(setupConnection?.state || "")) {
       desktopController.current?.abort(); desktopController.current = null;
       desktopBinding.current = null; setDesktopBusy(false); setDesktop(null);
       setError("The runtime changed or became unavailable. Refresh its status, then open a new desktop session.");
     }
-  }, [desktop, desktopReady, selected, setupConnection?.generation]);
+  }, [desktop, agent, selected, setupConnection?.generation, setupConnection?.state]);
   useEffect(() => {
     if (!selected) return;
     const key = ps.apiKey; const abort = new AbortController();
@@ -388,9 +390,12 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
     const abort = new AbortController(); desktopController.current = abort;
     setDesktopBusy(true);
     try {
+      const connection = await agentRequest<AgentConnection>(key, `/${encodeURIComponent(id)}/connections`, { signal: abort.signal });
+      if (abort.signal.aborted || activeKey.current !== key) return;
+      setSetupConnection(connection);
       const opened = await openAgentDesktop(key, id, abort.signal);
       if (!abort.signal.aborted && activeKey.current === key) {
-        desktopBinding.current = { agentId: id, generation: setupConnection?.generation };
+        desktopBinding.current = { agentId: id, generation: connection.generation };
         setDesktop(desktopSocket(opened, id));
       }
     } catch (e) { if (!abort.signal.aborted && activeKey.current === key) report(e); }
@@ -456,6 +461,10 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
         <button className="btn" aria-expanded={connectionsOpen} aria-controls="agent-github-setup" disabled={busy || !!confirmation || !!editor} onClick={openConnections}>GitHub</button>
         <button className="btn" disabled={busy || !!confirmation || !!editor || connectionsOpen} onClick={() => void guarded((key, signal) => command("files", "", key, signal))}>Agent files</button>
         <button className="btn" disabled={busy || !!confirmation || !!editor || connectionsOpen} onClick={() => setMemoryOpen(true)}>Memory</button>
+        <button className="btn" disabled={busy || pending || !!confirmation || !!editor || connectionsOpen || conversations.current.needsReview(agent.id)} onClick={() => setConfirmation({
+          title: "Start a new conversation?", detail: "Clear this tab's displayed conversation and start a fresh thread. The agent's saved files and persistent memory remain.",
+          run: async () => { conversations.current.startNew(agent.id); setEntries([]); setInput(""); },
+        })}>New conversation</button>
         <button className="btn" title={features.unlock ? "Give the agent the key that decrypts its .env" : "Waiting for Alpha to enable unlock"} disabled={!features.unlock || !runtimeReady || busy} onClick={() => setUnlockOpen(true)}>{agent.unlocked ? "Unlocked" : "Unlock"}</button>
         <button className="btn" title={features.sync ? "Pull the latest commit and restart the agent" : "Waiting for Alpha to enable Pull & restart"} disabled={!features.sync || !runtimeReady || busy || !!confirmation} onClick={confirmSync}>Pull &amp; restart</button>
         <button className="btn" title={features.desktop ? "Open the agent's desktop" : "Waiting for Alpha to enable the desktop"} disabled={!features.desktop || !desktopReady || desktopBusy} onClick={() => void openDesktop()}>Desktop</button></>}

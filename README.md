@@ -106,7 +106,9 @@ token usage. Fact browsing, export and deletion are unavailable.
 
 An encrypted configuration lock does not disable local browser, file or Blender
 tools. Host memory additionally requires both configuration and an enabled policy.
-Conversation IDs remain stable per agent in the signed-in tab. If a reply is
+Conversation IDs remain stable per agent in the signed-in tab. Use **New
+conversation** to start a fresh thread while retaining saved files and host memory.
+If a reply is
 interrupted, review status, files and logs and explicitly confirm that review
 before continuing; Studio never replays a non-idempotent task automatically.
 Runtime replacement closes a desktop from the previous observed generation;

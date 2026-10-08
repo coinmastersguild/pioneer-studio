@@ -1,3 +1,5 @@
+import type { HostedAgent } from "./api";
+
 type Conversation = { session: string; state: "idle" | "running" | "uncertain" };
 
 /** Conversation IDs and reconciliation state live only in this signed-in tab. */
@@ -24,10 +26,24 @@ export class AgentConversations {
     if (conversation.state === "running") throw new Error("Wait for the active request to finish.");
     conversation.state = "idle";
   }
+  startNew(agentId: string): string {
+    const conversation = this.get(agentId);
+    if (conversation.state !== "idle") throw new Error("Review the previous task before starting another conversation.");
+    conversation.session = crypto.randomUUID();
+    return conversation.session;
+  }
   clear(): void { this.conversations.clear(); }
 }
 
 export type DesktopRuntimeBinding = { agentId: string; generation?: number };
 export function desktopRuntimeChanged(opened: DesktopRuntimeBinding, agentId: string, generation?: number): boolean {
   return opened.agentId !== agentId || (opened.generation !== undefined && generation !== undefined && opened.generation !== generation);
+}
+
+/** Missing summary fields are not evidence that an already-admitted desktop stopped. */
+export function desktopRuntimeUnavailable(agent: Pick<HostedAgent, "template" | "status" | "live">): boolean {
+  if (agent.template !== "openhuman" || !["running", "paused_budget"].includes(agent.status)) return true;
+  const live = agent.live;
+  return !!live && ((live.container !== undefined && live.container !== "running") ||
+    (live.state !== undefined && live.state !== "running") || (live.status !== undefined && live.status !== "active"));
 }
