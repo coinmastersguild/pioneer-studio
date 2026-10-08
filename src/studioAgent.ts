@@ -9,6 +9,7 @@ import {
 import { actionForTool, actionTools, callAction, confirmationForTool } from "./control";
 import type { Mode } from "./shared";
 import { loadPipeline } from "./pipeline";
+import { hostedAgentRequest } from "./hostedAgentDelegation";
 
 export type PreparedStudioAction = {
   call: ChatToolCall;
@@ -108,6 +109,17 @@ ${digest(context.mode, context.board, context.media || null)}`,
     ...(context.history || []).filter((message) => message.role !== "system").slice(-30),
     { role: "user", content: userText },
   ];
+  const delegatedTask = hostedAgentRequest(userText, context.history);
+  if (delegatedTask) {
+    if (actionForTool("agents_delegate")?.name !== "agents.delegate") {
+      throw new Error("Hosted-agent delegation is unavailable. Open Agents to check your agent's setup; no generation job was started.");
+    }
+    const assistant: ChatAssistantMessage = { role: "assistant", content: null, tool_calls: [{
+      id: `hosted-${crypto.randomUUID()}`, type: "function",
+      function: { name: "agents_delegate", arguments: JSON.stringify({ task: delegatedTask }) },
+    }] };
+    return { messages, assistant, actions: preparedActions(assistant) };
+  }
   const assistant = await chatCompletionMessage(apiKey, messages, { tools: actionTools(), toolChoice: "auto" });
   return { messages, assistant, actions: preparedActions(assistant) };
 }
