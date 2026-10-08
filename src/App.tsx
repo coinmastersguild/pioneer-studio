@@ -1,6 +1,10 @@
+import HostedAgentTaskReview from "./HostedAgentTaskReview";
+import HostedAgentChooser, { type HostedAgentChoice } from "./HostedAgentChooser";
+import HostedAgentTaskPanel from "./HostedAgentTaskPanel";
+import type { HostedAgentTask } from "./hostedAgentTask";
 import { useEffect, useRef, useState } from "react";
 import { WORKSPACE_GROUPS } from "./studioNavigation";
-import { hostedAgentRequest } from "./hostedAgentDelegation";
+import { hostedAgentRequest, unavailableVideoRequest } from "./hostedAgentDelegation";
 import { dispatchWorkspaceInput } from "./workspaceInput";
 import { connectionReturn } from "./agentConnectionState";
 import type { WalletOption } from "./wallets";
@@ -80,7 +84,7 @@ import {
 // every view sheet above, including the ones the view modules pull in.
 import "./mobile.css";
 
-type ThreadItem = { id: number; kind: "user" | "ai"; text: string };
+type ThreadItem = { id: number; kind: "user" | "ai"; text: string; hostedTask?: HostedAgentTask; hostedChoice?: { agents: HostedAgentChoice[]; goal: string }; hostedReview?: { detail: string; goal: string; agent_id: string; name: string } };
 type Toast = { id: number; msg: string; kind?: "ok" | "gold"; out?: boolean };
 type PendingAgentTurn = { turn: StudioAgentTurn; completed: StudioActionResult[]; actions: PreparedStudioAction[] };
 
@@ -591,6 +595,23 @@ function App() {
     agentHistoryRef.current = [...turn.messages.filter((message) => message.role !== "system"), turn.assistant].slice(-30);
   }
 
+  function hostedTaskObserver(key: string, epoch: number) {
+    let messageId: number | undefined;
+    return (task: HostedAgentTask) => {
+      if (epoch !== accountEpochRef.current || key !== apiKeyRef.current) return;
+      if (messageId === undefined) { messageId = nextId.current++; setThread((previous) => [...previous, { id: messageId!, kind: "ai", text: "", hostedTask: task }]); }
+      else setThread((previous) => previous.map((message) => message.id === messageId ? { ...message, hostedTask: task } : message));
+      setAiStateRaw({ label: ["checking", "running"].includes(task.state) ? "agent working" : "idle", working: ["checking", "running"].includes(task.state) });
+    };
+  }
+
+  async function delegateInRail(goal: string, key: string, epoch: number, confirmed = false, agentId?: string) {
+    if (epoch !== accountEpochRef.current || key !== apiKeyRef.current) throw new Error("Account changed; review this task again. No task was sent.");
+    const result = await callAction("agents.delegate", { task: goal, ...(agentId ? { agent_id: agentId } : {}) }, { onHostedTask: hostedTaskObserver(key, epoch), hostedTaskConfirmed: confirmed }) as HostedAgentTask | { selection_required: true; agents: HostedAgentChoice[] } | { confirmation_required: true; detail: string; agent_id: string; name: string };
+    if (epoch === accountEpochRef.current && key === apiKeyRef.current && "confirmation_required" in result) setThread((previous) => [...previous, { id: nextId.current++, kind: "ai", text: "", hostedReview: { detail: result.detail, goal, agent_id: result.agent_id, name: result.name } }]);
+    if (epoch === accountEpochRef.current && key === apiKeyRef.current && "selection_required" in result) setThread((previous) => [...previous, { id: nextId.current++, kind: "ai", text: "", hostedChoice: { agents: result.agents, goal } }]);
+  }
+
   async function runAgentLoop(initial: StudioAgentTurn, key: string, epoch: number) {
     let turn = initial;
     for (let round = 0; round < 8; round++) {
@@ -606,6 +627,7 @@ function App() {
       const completed: StudioActionResult[] = [];
       for (const action of safe) {
         if (epoch !== accountEpochRef.current || key !== apiKeyRef.current) return;
+        if (action.actionName === "agents.delegate" && typeof action.params.task === "string") { await delegateInRail(action.params.task, key, epoch); return; }
         completed.push(await executeStudioAction(action));
       }
       if (epoch !== accountEpochRef.current || key !== apiKeyRef.current) return;
@@ -629,19 +651,18 @@ function App() {
 
   async function sendCopilot() {
     const v = chatText.trim();
-    if (!v || busyRef.current || pendingAgent) return;
+    if (!v || pendingAgent) return;
+    const directAgent = mode !== "agents" && (hostedAgentRequest(v, agentHistoryRef.current) || (unavailableVideoRequest(v, models, catalogAvailable) ? v : null));
+    if (busyRef.current && !directAgent) return;
     const key = apiKeyRef.current;
     const epoch = accountEpochRef.current;
     setChatText("");
-    const delegated = mode !== "agents" && hostedAgentRequest(v, agentHistoryRef.current);
+    const delegated = directAgent;
     if (delegated && mode !== "chat") {
-      addMsg("You", v); busyRef.current = true;
+      addMsg("You", v);
       try {
-        const result = await callAction("agents.delegate", { task: delegated }) as { prepared?: boolean; confirmation_required?: boolean };
-        if (result.prepared !== true || result.confirmation_required !== true) throw new Error("Task review was not prepared.");
-        if (epoch === accountEpochRef.current) addMsg("Copilot", "Task prepared in Agents. Review and confirm it before it starts; no task has been sent yet.");
+        await delegateInRail(delegated, key, epoch);
       } catch (error) { if (epoch === accountEpochRef.current) addMsg("Copilot", error instanceof Error ? error.message : "Select your intended runnable agent in Agents."); }
-      finally { if (epoch === accountEpochRef.current) busyRef.current = false; }
       return;
     }
     const routed = dispatchWorkspaceInput(mode, v, inputHandlers.current);
@@ -892,7 +913,7 @@ function App() {
           {thread.map((m) => (
             <div key={m.id} className={`msg ${m.kind === "user" ? "user" : "ai"}`}>
               <div className="who">{m.kind === "user" ? "You" : "Copilot"}</div>
-              <div className="bubble">{m.text}</div>
+              <div className="bubble">{m.hostedReview ? <HostedAgentTaskReview detail={`Agent: ${m.hostedReview.name}. ${m.hostedReview.detail}`} onConfirm={() => delegateInRail(m.hostedReview!.goal, apiKey, accountEpoch, true, m.hostedReview!.agent_id)} /> : m.hostedChoice ? <HostedAgentChooser agents={m.hostedChoice.agents} onSelected={() => delegateInRail(m.hostedChoice!.goal, apiKey, accountEpoch)} /> : m.hostedTask ? <HostedAgentTaskPanel key={`${accountEpoch}:${m.hostedTask.task_id}`} apiKey={apiKey} task={m.hostedTask} onReview={() => setMode("agents")} /> : m.text}</div>
             </div>
           ))}
         </div>

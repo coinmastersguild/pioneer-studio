@@ -6,7 +6,7 @@ import {
   type MediaList,
   type Storyboard,
 } from "./api";
-import { actionForTool, actionTools, callAction, confirmationForTool } from "./control";
+import { actionForTool, actionTools, callAction, confirmationForTool, type ControlContext } from "./control";
 import type { Mode } from "./shared";
 import { loadPipeline } from "./pipeline";
 import { hostedAgentRequest } from "./hostedAgentDelegation";
@@ -100,9 +100,9 @@ Navigating is free and expected: call app.set_mode to open a screen, then use th
           : ""
       }
 
-For an explicit request to tell, ask, have or delegate work to a hosted agent, use agents_delegate when advertised. agents_list can discover this owner's agents. Preserve the complete user goal and its clarification; if a target is ambiguous, let the user select it. Never substitute a generation job for an explicit hosted-agent request. agents_delegate only prepares a task for the SAME hosted-agent UI confirmation: a result with prepared:true and confirmation_required:true means no task has run yet. Report it as prepared for review, never completed, and stop until that confirmation.
+For an explicit request to tell, ask, have or delegate work to a hosted agent, use agents_delegate when advertised. agents_list can discover this owner's agents. Preserve the complete user goal and its clarification; if a target is ambiguous, let the user select it. Never substitute a generation job for an explicit hosted-agent request. agents_delegate runs ordinary requested authoring directly on the selected owner agent, with prepaid inference tokens. Its checking/running result means work is in progress, complete means its reply ended, and uncertain means work may still run: never claim a video is complete without checking its actual files/playback. Stop after its result; never substitute jobs or retry. A legacy prepared:true and confirmation_required:true result means only prepared for review, not run.
 
-When jobs_submit is advertised, it can run one paid generation job using ONLY an exact model/endpoint pair and parameter schema in that tool. If no live matching endpoint is advertised, explain that it is unavailable. For video, offer local Blender authoring by a hosted agent as an explicit alternative; never claim it has started. Do not invent model names, tool names, endpoints, credentials or capabilities. Never print a {"job": ...} plan as assistant text: that does not execute anything. Paid generation and hosted-agent tasks require their own explicit user confirmation before they run.
+When jobs_submit is advertised, it can run one paid generation job using ONLY an exact model/endpoint pair and parameter schema in that tool. If no live matching endpoint is advertised, explain that it is unavailable. For video, offer local Blender authoring by a hosted agent as an explicit alternative; never claim it has started. Do not invent model names, tool names, endpoints, credentials or capabilities. Never print a {"job": ...} plan as assistant text: that does not execute anything. Paid generation, purchases, publishing and lifecycle changes require their own explicit user confirmation. The owner’s ordinary authoring request itself authorizes that hosted-agent task.
 
 ${digest(context.mode, context.board, context.media || null)}`,
     },
@@ -133,9 +133,9 @@ function resultText(result: unknown): string {
   }
 }
 
-export async function executeStudioAction(action: PreparedStudioAction): Promise<StudioActionResult> {
+export async function executeStudioAction(action: PreparedStudioAction, context?: ControlContext): Promise<StudioActionResult> {
   try {
-    const result = await callAction(action.actionName, action.params);
+    const result = await callAction(action.actionName, action.params, context);
     return {
       action,
       message: {
@@ -165,6 +165,18 @@ const FAILED_TASK_MESSAGE = "The hosted-agent task could not be prepared. Check 
 
 function hostedTaskResultMessage(results: StudioActionResult[]): string | null {
   if (!results.some((result) => result.action.actionName === "agents.delegate")) return null;
+  for (const result of results.filter((result) => result.action.actionName === "agents.delegate" && !result.error)) {
+    try {
+      const task = JSON.parse(result.message.content);
+      if (task.confirmation_required === true && task.detail) return "Review the intended agent and consequential action, then explicitly confirm it. No task was sent.";
+      if (task.selection_required === true) return "Choose your intended owned agent before this request can run. No task was sent.";
+      if (task.state === "complete") return task.existing ? "The previous agent task's reply completed. Your new request was not sent." : "The agent reply completed; review its output against your request.";
+      if (task.state === "empty") return "The agent reply ended without text. Check its files and logs; it was not retried.";
+      if (task.state === "uncertain") return "The agent request was interrupted and may still run. Review its previous work; it was not retried.";
+      if (["checking", "running"].includes(task.state)) return "The agent is already working on the current task. Your new request was not sent.";
+      if (task.state === "failed") return task.text || "The agent task could not start. No substitute generation job was submitted.";
+    } catch { /* A malformed result never authorizes another action. */ }
+  }
   return hasPreparedHostedTask(results) ? PREPARED_TASK_MESSAGE : FAILED_TASK_MESSAGE;
 }
 

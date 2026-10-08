@@ -27,7 +27,10 @@ agents and for people using LLMs to contribute.
    authorization, and never introduce a privileged browser credential.
 4. Route automated actions through the same handlers as UI actions. Spending,
    deletion, publication, and other consequential operations require an explicit
-   user confirmation.
+   user confirmation. An ordinary authoring request or Send click for the
+   owner’s selected hosted agent authorizes that task’s prepaid inference;
+   publishing, account writes, purchases and destructive/lifecycle changes
+   still require their explicit review confirmation.
 5. Add or update focused tests for behavioral changes. Use `bun run test`, not a
    repository-wide test discovery command that may enter ignored vendor trees.
 6. Run `bun run check` before handing work back.

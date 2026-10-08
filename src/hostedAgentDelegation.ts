@@ -25,7 +25,9 @@ export function hostedAgentRequest(text: string, history: ChatMessage[] = []): s
 
 /** Catalog names are not proof of video support; use its actual output contract. */
 export function unavailableVideoRequest(text: string, models: JobModel[], catalogAvailable: boolean): boolean {
-  return VIDEO_REQUEST.test(text) && (!catalogAvailable || !models.some((entry) =>
+  const question = /^\s*(?:how\s+(?:do|can|does)|what|which|does|is|are|why|explain|tell me\s+(?:about|how))\b/i.test(text);
+  const authoring = /\b(?:make|create|render|animate|animated|author|generate|build|produce|shoot|film)\b/i.test(text);
+  return !question && authoring && VIDEO_REQUEST.test(text) && (!catalogAvailable || !models.some((entry) =>
     entry.result === "binary" && /^\.(?:mp4|webm|mov|m4v|mkv|avi)$/i.test(entry.result_ext || ""),
   ));
 }
@@ -44,7 +46,7 @@ export function prepareHostedAgentTask(goal: string, outputPrefix?: string): str
     "Save authored artifacts in the agent's files and report their actual paths. Claim completion only after checking the requested output exists and is valid.",
   ];
   if (VIDEO_REQUEST.test(request)) instructions.push(
-    "For a video task, use an available local animation tool to author a scene with motion and save both a playable MP4 (.mp4) and its editable .blend source. Verify the actual video duration and multiple distinct frames; a PNG preview or scene file alone is not a finished video. If no video tool is available, report that limitation instead of claiming a render.",
+    "For a video task, use an available local animation tool to author a scene with motion and save both a playable MP4 (.mp4) and its editable .blend source. Verify the actual video duration and multiple distinct frames; use available preview or screenshot tools to visually inspect those frames for complete subject framing, visible motion and the requested lighting. Correct cropped subjects or mismatched lighting before reporting completion; a PNG preview or scene file alone is not a finished video. If no video tool is available, report that limitation instead of claiming a render.",
   );
   if (outputPrefix !== undefined) instructions.push(
     `Use the new output basename ${outputPrefix} with the exact tool schema's supported naming field; do not invent parameters. For video, save desktop-test/${outputPrefix}.mp4 and desktop-test/${outputPrefix}.blend and report those exact newly authored paths. Do not substitute files from an earlier task.`,
@@ -52,4 +54,11 @@ export function prepareHostedAgentTask(goal: string, outputPrefix?: string): str
   const task = `${request}\n\nExecution requirements:\n${instructions.join("\n")}`;
   if (encoder.encode(task).length > MAX_TASK_BYTES) throw new Error("The complete hosted-agent task must fit within 16 KiB.");
   return task;
+}
+
+/** Ordinary creation is direct; account writes and destructive actions still pause. */
+export function hostedTaskReviewReason(task: string): string | null {
+  return /\b(?:publish|tweet|email|purchase|buy|pay|transfer|withdraw|delete|revoke|merge|deploy)\b|\b(?:post|send)\s+(?:a\s+|an\s+|the\s+)?(?:tweet|email|message|post)\b|\bpush\s+(?:to\s+)?(?:github|origin|upstream|a\s+branch|the\s+branch)\b|\b(?:top[- ]?up|suspend|resume|replace)\s+(?:the\s+|my\s+)?agent\b/i.test(task)
+    ? "Review account or destructive actions: this task may publish, send messages, spend funds, remove data or change a runtime. Confirm only the intended action."
+    : null;
 }

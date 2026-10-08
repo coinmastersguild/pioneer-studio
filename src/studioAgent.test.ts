@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { actionForTool, actionTools, clearActions, registerActions } from "./control";
+import { actionForTool, actionTools, callAction, clearActions, registerActions } from "./control";
 import { beginStudioAgentTurn, continueStudioAgentTurn, executeStudioAction, finishStudioAgentTurn } from "./studioAgent";
 
 test("registered actions become model tools and execute through the same handler", async () => {

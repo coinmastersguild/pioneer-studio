@@ -1,3 +1,4 @@
+import HostedAgentTaskReview from "./HostedAgentTaskReview";
 import { useEffect, useRef, useState } from "react";
 import { JobTerminalError, uploadMedia, type ChatMessage, type MediaObject } from "./api";
 import { boardBrief, critiqueResult, proposeContract, requestJobPlan } from "./copilot";
@@ -12,6 +13,9 @@ import { clearPendingJob, loadPendingJobs, resumePendingJob } from "./pendingJob
 import { ChatRunTracker, type ChatRunStage } from "./chatActivity";
 import { hostedAgentRequest, unavailableVideoRequest } from "./hostedAgentDelegation";
 import { callAction } from "./control";
+import HostedAgentChooser, { type HostedAgentChoice } from "./HostedAgentChooser";
+import HostedAgentTaskPanel from "./HostedAgentTaskPanel";
+import type { HostedAgentTask } from "./hostedAgentTask";
 import { prepareGenerationJob, runGenerationJob } from "./generationJob";
 import { IcCopy, IcImage, IcMusic, IcPlay, IcSend, IcSpark, kindOf, sleep, type PS } from "./shared";
 
@@ -33,7 +37,9 @@ type JobInfo = {
 type Part =
   | { id: number; type: "text"; text: string }
   | { id: number; type: "plan"; plan: PlanInfo; review: "pending" | "submitted" | "cancelled" }
-  | { id: number; type: "agent-offer"; task: string; prepared: boolean }
+  | { id: number; type: "agent-task"; task: HostedAgentTask; ownerSession: string }
+  | { id: number; type: "agent-choice"; agents: HostedAgentChoice[]; goal: string; ownerSession: string }
+  | { id: number; type: "agent-review"; goal: string; detail: string; agent_id: string; name: string; ownerSession: string }
   | { id: number; type: "job"; job: JobInfo }
   | { id: number; type: "flow"; flowId: string }
   | { id: number; type: "skeleton" }
@@ -128,6 +134,8 @@ export default function ChatView({ ps, active = true }: { ps: PS; active?: boole
   // has to see what it already asked and what was answered
   const historyRef = useRef<ChatMessage[]>([]);
   const runTracker = useRef(new ChatRunTracker());
+  const ownerSession = useRef({ key: ps.apiKey, id: crypto.randomUUID() });
+  if (ownerSession.current.key !== ps.apiKey) ownerSession.current = { key: ps.apiKey, id: crypto.randomUUID() };
   const psRef = useRef(ps);
   psRef.current = ps;
 
@@ -266,13 +274,22 @@ export default function ChatView({ ps, active = true }: { ps: PS; active?: boole
   const openSkeletonRef = useRef(openSkeleton);
   openSkeletonRef.current = openSkeleton;
 
-  async function delegateTask(goal: string, aiTurn = addTurn("ai")) {
+  async function delegateTask(goal: string, aiTurn = addTurn("ai"), confirmed = false, agentId?: string, expectedOwner?: string) {
+    if (expectedOwner !== undefined && expectedOwner !== ownerSession.current.id) throw new Error("Account changed; review this task again. No task was sent.");
+    const key = psRef.current.apiKey; const owner = ownerSession.current.id; let progressPart: number | undefined;
+    const observe = (task: HostedAgentTask) => {
+      if (ownerSession.current.id !== owner || psRef.current.apiKey !== key) return;
+      if (progressPart === undefined) progressPart = addPart(aiTurn, { type: "agent-task", task, ownerSession: owner } as NewPart);
+      else patchPart(aiTurn, progressPart, { task } as PartPatch);
+    };
     try {
-      const result = await callAction("agents.delegate", { task: goal }) as { prepared?: boolean; confirmation_required?: boolean };
-      if (result.prepared !== true || result.confirmation_required !== true) throw new Error("Task review was not prepared.");
-      addPart(aiTurn, { type: "text", text: "Task prepared in Agents. Review the selected agent and confirm before it starts; no task has been sent yet." } as NewPart);
-      historyRef.current = [...historyRef.current, { role: "user", content: goal }, { role: "assistant", content: "Task prepared for owner review." }].slice(-12) as ChatMessage[];
-    } catch (error) { addPart(aiTurn, { type: "text", text: error instanceof Error ? error.message : "Open Agents and select your intended runnable agent." } as NewPart); }
+      const result = await callAction("agents.delegate", { task: goal, ...(agentId ? { agent_id: agentId } : {}) }, { onHostedTask: observe, hostedTaskConfirmed: confirmed }) as HostedAgentTask | { selection_required: true; agents: HostedAgentChoice[] } | { confirmation_required: true; detail: string; agent_id: string; name: string };
+      if (ownerSession.current.id !== owner || psRef.current.apiKey !== key) return;
+      if ("selection_required" in result) { addPart(aiTurn, { type: "agent-choice", goal, agents: result.agents, ownerSession: owner } as NewPart); return; }
+      if ("confirmation_required" in result) { addPart(aiTurn, { type: "agent-review", goal, detail: result.detail, agent_id: result.agent_id, name: result.name, ownerSession: owner } as NewPart); return; }
+      observe(result);
+      if (!result.existing && (result.state === "complete" || result.state === "empty")) historyRef.current = [...historyRef.current, { role: "user", content: goal }, { role: "assistant", content: result.text || "The agent reply ended without text." }].slice(-12) as ChatMessage[];
+    } catch (error) { if (ownerSession.current.id === owner) addPart(aiTurn, { type: "text", text: error instanceof Error ? error.message : "Select your intended runnable agent." } as NewPart); if (confirmed) throw error; }
   }
 
   async function fire(input: string) {
@@ -284,10 +301,6 @@ export default function ChatView({ ps, active = true }: { ps: PS; active?: boole
     addTurn("user", [{ id: nextId.current++, type: "text", text: t }]);
     const delegated = hostedAgentRequest(t, historyRef.current);
     if (delegated) { await delegateTask(delegated); return; }
-    if (unavailableVideoRequest(t, p.models, p.catalogAvailable)) {
-      const ai = addTurn("ai", [{ id: nextId.current++, type: "text", text: "No live video generation endpoint is available. You can ask your selected hosted agent to discover its local Blender animation tools and save an MP4 plus the editable scene." }]);
-      addPart(ai, { type: "agent-offer", task: t, prepared: false } as NewPart); return;
-    }
     if (/\b(loop|keep (going|trying)|until (it|its|it's)? ?(right|good|done)|iterate|refine until|work on (it|this) until)\b/i.test(t)) {
       await openLoop(t);
       return;
@@ -301,6 +314,7 @@ export default function ChatView({ ps, active = true }: { ps: PS; active?: boole
       await openFlow(wanted, `That's a control flow, not a one-shot job — here's the card. ${wanted.blurb}`);
       return;
     }
+    if (unavailableVideoRequest(t, p.models, p.catalogAvailable)) { await delegateTask(t); return; }
     if (!p.apiKey) {
       const aiT = addTurn("ai");
       await streamText(aiT, "Add your sk-pioneer key in Settings first — I can't run jobs without it.");
@@ -569,9 +583,9 @@ export default function ChatView({ ps, active = true }: { ps: PS; active?: boole
                     const f = flowById(part.flowId);
                     return f ? <FlowCard key={part.id} flow={f} ps={ps} /> : null;
                   }
-                  if (part.type === "agent-offer") return <button key={part.id} className="btn" disabled={part.prepared} onClick={() => {
-                    patchPart(turn.id, part.id, { prepared: true } as PartPatch); void delegateTask(part.task, turn.id);
-                  }}>Use hosted agent</button>;
+                  if (part.type === "agent-review") return part.ownerSession === ownerSession.current.id ? <HostedAgentTaskReview key={part.id} detail={`Agent: ${part.name}. ${part.detail}`} onConfirm={() => delegateTask(part.goal, turn.id, true, part.agent_id, part.ownerSession)} /> : null;
+                  if (part.type === "agent-choice") return part.ownerSession === ownerSession.current.id ? <HostedAgentChooser key={part.id} agents={part.agents} onSelected={() => delegateTask(part.goal, turn.id)} /> : null;
+                  if (part.type === "agent-task") return part.ownerSession === ownerSession.current.id ? <HostedAgentTaskPanel key={`${part.ownerSession}:${part.task.task_id}`} apiKey={ps.apiKey} task={part.task} onReview={() => ps.setMode("agents")} /> : null;
                   if (part.type === "plan") {
                     const pl = part.plan;
                     return (

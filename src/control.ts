@@ -6,19 +6,25 @@
 // Agents: `window.__studio.actions()` lists what's live; `window.__studio.call
 // (action, params)` runs one. External automation can forward tool calls here.
 import type { ChatTool } from "./api";
+import type { HostedAgentTask } from "./hostedAgentTask";
+
+/** Local UI observers are never accepted in tool JSON or sent to the server. */
+export type ControlContext = { onHostedTask?: (task: HostedAgentTask) => void; /** Set only by an explicit local task-review click, never tool JSON. */ hostedTaskConfirmed?: boolean };
 
 export type ControlResult = unknown;
 export type ControlAction = {
   name: string;
   /** Unavailable capabilities must not be advertised or callable. */
   available?: boolean;
+  /** A local UI action may be callable without being offered to model tools. */
+  advertise?: boolean;
   description: string;
   parameters?: Record<string, unknown>;
   /** Why this action must pause for an explicit click in the copilot rail. */
   confirmation?: string;
   /** Request-specific confirmation text, used when price or target is dynamic. */
   confirmationFor?: (params: Record<string, unknown>) => string;
-  run: (params?: Record<string, unknown>) => Promise<ControlResult> | ControlResult;
+  run: (params?: Record<string, unknown>, context?: ControlContext) => Promise<ControlResult> | ControlResult;
 };
 
 const registry = new Map<string, ControlAction>();
@@ -32,7 +38,7 @@ export function registerActions(actions: ControlAction[]): void {
 }
 
 export function listActions(): { name: string; description: string; parameters: Record<string, unknown>; confirmation?: string }[] {
-  return [...registry.values()].filter((action) => action.available !== false).map(({ name, description, parameters, confirmation }) => ({
+  return [...registry.values()].filter((action) => action.available !== false && action.advertise !== false).map(({ name, description, parameters, confirmation }) => ({
     name,
     description,
     parameters: parameters || { type: "object", properties: {}, additionalProperties: false },
@@ -62,10 +68,10 @@ export function confirmationForTool(name: string, params: Record<string, unknown
   return action?.confirmationFor?.(params) ?? action?.confirmation;
 }
 
-export async function callAction(name: string, params?: Record<string, unknown>): Promise<ControlResult> {
+export async function callAction(name: string, params?: Record<string, unknown>, context?: ControlContext): Promise<ControlResult> {
   const a = registry.get(name);
   if (!a || a.available === false) throw new Error(`Action "${name}" is unavailable.`);
-  return a.run(params);
+  return a.run(params, context);
 }
 
 declare global {
