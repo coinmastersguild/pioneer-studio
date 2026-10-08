@@ -605,9 +605,9 @@ function App() {
     };
   }
 
-  async function delegateInRail(goal: string, key: string, epoch: number, confirmed = false, agentId?: string) {
+  async function delegateInRail(goal: string, key: string, epoch: number, confirmed = false, agentId?: string, toolParams?: Record<string, unknown>) {
     if (epoch !== accountEpochRef.current || key !== apiKeyRef.current) throw new Error("Account changed; review this task again. No task was sent.");
-    const result = await callAction("agents.delegate", { task: goal, ...(agentId ? { agent_id: agentId } : {}) }, { onHostedTask: hostedTaskObserver(key, epoch), hostedTaskConfirmed: confirmed }) as HostedAgentTask | { selection_required: true; agents: HostedAgentChoice[] } | { confirmation_required: true; detail: string; agent_id: string; name: string };
+    const result = await callAction("agents.delegate", toolParams ?? { task: goal, ...(agentId ? { agent_id: agentId } : {}) }, { onHostedTask: hostedTaskObserver(key, epoch), hostedTaskConfirmed: confirmed }) as HostedAgentTask | { selection_required: true; agents: HostedAgentChoice[] } | { confirmation_required: true; detail: string; agent_id: string; name: string };
     if (epoch === accountEpochRef.current && key === apiKeyRef.current && "confirmation_required" in result) setThread((previous) => [...previous, { id: nextId.current++, kind: "ai", text: "", hostedReview: { detail: result.detail, goal, agent_id: result.agent_id, name: result.name } }]);
     if (epoch === accountEpochRef.current && key === apiKeyRef.current && "selection_required" in result) setThread((previous) => [...previous, { id: nextId.current++, kind: "ai", text: "", hostedChoice: { agents: result.agents, goal } }]);
   }
@@ -627,7 +627,7 @@ function App() {
       const completed: StudioActionResult[] = [];
       for (const action of safe) {
         if (epoch !== accountEpochRef.current || key !== apiKeyRef.current) return;
-        if (action.actionName === "agents.delegate" && typeof action.params.task === "string") { await delegateInRail(action.params.task, key, epoch); return; }
+        if (action.actionName === "agents.delegate" && typeof action.params.task === "string") { await delegateInRail(action.params.task, key, epoch, false, undefined, action.params); return; }
         completed.push(await executeStudioAction(action));
       }
       if (epoch !== accountEpochRef.current || key !== apiKeyRef.current) return;
@@ -910,10 +910,10 @@ function App() {
           <span className="cap" id="aiState">{aiState.label}</span>
         </div>
         <div className="thread" id="thread" ref={threadEl}>
-          {thread.map((m) => (
+          {thread.map((m, index) => (
             <div key={m.id} className={`msg ${m.kind === "user" ? "user" : "ai"}`}>
               <div className="who">{m.kind === "user" ? "You" : "Copilot"}</div>
-              <div className="bubble">{m.hostedReview ? <HostedAgentTaskReview detail={`Agent: ${m.hostedReview.name}. ${m.hostedReview.detail}`} onConfirm={() => delegateInRail(m.hostedReview!.goal, apiKey, accountEpoch, true, m.hostedReview!.agent_id)} /> : m.hostedChoice ? <HostedAgentChooser agents={m.hostedChoice.agents} onSelected={() => delegateInRail(m.hostedChoice!.goal, apiKey, accountEpoch)} /> : m.hostedTask ? <HostedAgentTaskPanel key={`${accountEpoch}:${m.hostedTask.task_id}`} apiKey={apiKey} task={m.hostedTask} onReview={() => setMode("agents")} /> : m.text}</div>
+              <div className="bubble">{m.hostedReview ? <HostedAgentTaskReview detail={`Agent: ${m.hostedReview.name}. ${m.hostedReview.detail}`} onConfirm={() => delegateInRail(m.hostedReview!.goal, apiKey, accountEpoch, true, m.hostedReview!.agent_id)} /> : m.hostedChoice ? <HostedAgentChooser agents={m.hostedChoice.agents} onSelected={(agentId) => delegateInRail(m.hostedChoice!.goal, apiKey, accountEpoch, false, agentId)} /> : m.hostedTask ? <HostedAgentTaskPanel key={`${accountEpoch}:${m.hostedTask.task_id}`} apiKey={apiKey} task={m.hostedTask} showArtifacts={!thread.slice(0, index).some((earlier) => earlier.hostedTask?.task_id === m.hostedTask?.task_id)} onReview={() => setMode("agents")} /> : m.text}</div>
             </div>
           ))}
         </div>

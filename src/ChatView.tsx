@@ -584,8 +584,8 @@ export default function ChatView({ ps, active = true }: { ps: PS; active?: boole
                     return f ? <FlowCard key={part.id} flow={f} ps={ps} /> : null;
                   }
                   if (part.type === "agent-review") return part.ownerSession === ownerSession.current.id ? <HostedAgentTaskReview key={part.id} detail={`Agent: ${part.name}. ${part.detail}`} onConfirm={() => delegateTask(part.goal, turn.id, true, part.agent_id, part.ownerSession)} /> : null;
-                  if (part.type === "agent-choice") return part.ownerSession === ownerSession.current.id ? <HostedAgentChooser key={part.id} agents={part.agents} onSelected={() => delegateTask(part.goal, turn.id)} /> : null;
-                  if (part.type === "agent-task") return part.ownerSession === ownerSession.current.id ? <HostedAgentTaskPanel key={`${part.ownerSession}:${part.task.task_id}`} apiKey={ps.apiKey} task={part.task} onReview={() => ps.setMode("agents")} /> : null;
+                  if (part.type === "agent-choice") return part.ownerSession === ownerSession.current.id ? <HostedAgentChooser key={part.id} agents={part.agents} onSelected={(agentId) => delegateTask(part.goal, turn.id, false, agentId, part.ownerSession)} /> : null;
+                  if (part.type === "agent-task") return part.ownerSession === ownerSession.current.id ? <HostedAgentTaskPanel key={`${part.ownerSession}:${part.task.task_id}`} apiKey={ps.apiKey} task={part.task} showArtifacts={!turns.flatMap((entry) => entry.parts).some((earlier) => earlier.type === "agent-task" && earlier.ownerSession === part.ownerSession && earlier.task.task_id === part.task.task_id && earlier.id < part.id)} onReview={() => ps.setMode("agents")} /> : null;
                   if (part.type === "plan") {
                     const pl = part.plan;
                     return (
