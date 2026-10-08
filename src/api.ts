@@ -192,10 +192,12 @@ export function connectionResources(apiKey: string, id: string, connectionId: st
 }
 
 /** Sends the dotenvx key to the agent's runtime memory. Alpha forwards it without storing or logging it. */
-export function unlockAgent(apiKey: string, id: string, key: string, signal?: AbortSignal) {
-  return agentRequest<{ unlocked: boolean }>(apiKey, `/${encodeURIComponent(id)}/unlock`, {
+export async function unlockAgent(apiKey: string, id: string, key: string, signal?: AbortSignal) {
+  const result = await agentRequest<{ unlocked: boolean }>(apiKey, `/${encodeURIComponent(id)}/unlock`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key }), signal,
   });
+  if (result?.unlocked !== true) throw new AgentApiError("The runtime did not confirm unlocked configuration. Check its status before trying again.", 502, "unlock_not_confirmed");
+  return result;
 }
 
 export function openAgentDesktop(apiKey: string, id: string, signal?: AbortSignal) {
