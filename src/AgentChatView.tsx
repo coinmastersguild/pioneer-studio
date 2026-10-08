@@ -495,7 +495,8 @@ export default function AgentChatView({ ps, active = true }: { ps: PS; active?: 
         <p>One agent turn can use several thousand prompt tokens. Pricing and purchase availability come from the live catalog.</p>
         <div className="agent-shortcuts">{["claim", "status", "github", "files", "memory", "logs", "usage", "help"].map((c) => <button className="btn" key={c} disabled={busy || !!confirmation || !!editor || connectionsOpen} onClick={() => { void guarded((key, signal) => command(c, "", key, signal)); }}>{`/${c}`}</button>)}</div>
       </div>}
-      {entries.map((entry) => <div className={`agent-entry ${entry.role}`} key={entry.id}><small>{entry.role === "user" ? "You" : entry.role === "agent" ? "Agent" : "Studio"}</small><pre>{entry.text || agentReplyPlaceholder(entry.replyState)}</pre></div>)}
+      {entries.map((entry) => <div className={`agent-entry ${entry.role}`} key={entry.id}><small>{entry.role === "user" ? "You" : entry.role === "agent" ? "Agent" : "Studio"}</small><pre>{entry.text || agentReplyPlaceholder(entry.replyState)}</pre>
+        {entry.replyState === "streaming" && <p role="status">Tool work may take up to 15 minutes. Replies arrive as completed content, rather than a live tool or token feed. Watch the desktop or runtime logs for progress.</p>}</div>)}
       {followingLogs && <div className="agent-card"><h3>Live runtime logs</h3><pre>{logs.join("\n") || "Awaiting runtime logs…"}</pre></div>}
       {monitorError && <p role="status">{monitorError}</p>}
       {intents.map((intent) => <div className="agent-card" key={intent.key}><strong>{pendingIntentSummary(intent)}</strong><p>{intent.operationId ? `Operation ${intent.operationId} is being reconciled.` : "Alpha has not confirmed this saved request's outcome. An agent may already exist; refresh the agent list. Retry uses the original purchase key and body. Do not claim again with a new request."}</p>

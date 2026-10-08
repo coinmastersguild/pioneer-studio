@@ -108,7 +108,9 @@ An encrypted configuration lock does not disable local browser, file or Blender
 tools. Host memory additionally requires both configuration and an enabled policy.
 Conversation IDs remain stable per agent in the signed-in tab. Use **New
 conversation** to start a fresh thread while retaining saved files and host memory.
-If a reply is
+Tool work may take up to 15 minutes, and the reply arrives as completed content;
+chat is not an incremental token or tool-event feed. Watch the desktop or logs
+while waiting. If a reply is
 interrupted, review status, files and logs and explicitly confirm that review
 before continuing; Studio never replays a non-idempotent task automatically.
 Runtime replacement closes a desktop from the previous observed generation;
