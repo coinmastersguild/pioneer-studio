@@ -74,7 +74,7 @@ test("the app copilot stages explicit delegation through advertised hosted-agent
     return new Response(JSON.stringify({ choices: [{ message: { content: "Review the prepared task." } }] }), { status: 200 });
   }) as typeof fetch;
   try {
-    await beginStudioAgentTurn("test-key", "tell the agent to make a cat video", { mode: "chat", board: null });
+    await beginStudioAgentTurn("test-key", "Which hosted-agent tools are available?", { mode: "chat", board: null });
     expect(prompt).toContain("agents_delegate");
     expect(prompt).toContain("confirmation_required");
     expect(prompt).toContain("Never substitute a generation job");
@@ -98,12 +98,46 @@ test("all Copilot callers stop at hosted-agent preparation instead of asking the
     const turn = await beginStudioAgentTurn("test-key", "tell the agent to make a cat video", { mode: "head", board: null });
     const result = await executeStudioAction(turn.actions[0]);
     const next = await continueStudioAgentTurn("test-key", turn, [result]);
-    expect(calls).toBe(1);
+    expect(calls).toBe(0);
     expect(next.actions).toHaveLength(0);
     expect(next.assistant.content).toContain("not run");
     expect(next.assistant.content).toContain("confirm");
     expect(await finishStudioAgentTurn("test-key", turn, [result])).toContain("not run");
-    expect(calls).toBe(1);
+    expect(calls).toBe(0);
+  } finally { globalThis.fetch = original; }
+});
+
+test("explicit delegation never reaches a model that could choose an available paid job", async () => {
+  clearActions();
+  let paidJobs = 0;
+  registerActions([
+    { name: "agents.delegate", description: "Prepare a task", run: () => ({ prepared: true, confirmation_required: true }) },
+    { name: "jobs.submit", description: "An actual paid catalog job", run: () => { paidJobs++; } },
+  ]);
+  const original = globalThis.fetch;
+  let modelCalls = 0;
+  globalThis.fetch = (async () => {
+    modelCalls++;
+    return Response.json({ choices: [{ message: { content: "Rendering now", tool_calls: [
+      { id: "wrong-route", type: "function", function: { name: "jobs_submit", arguments: '{"model":"actual-video","endpoint":"render","params":{}}' } },
+    ] } }] });
+  }) as typeof fetch;
+  try {
+    const originalGoal = "tell the agent to make me a cat video";
+    const turn = await beginStudioAgentTurn("test-key", "A cat walking through a garden", { mode: "head", board: null,
+      history: [{ role: "user", content: originalGoal }, { role: "assistant", content: "I asked: Which scene?" }],
+    });
+    expect(modelCalls).toBe(0);
+    expect(turn.actions).toHaveLength(1);
+    expect(turn.actions[0].actionName).toBe("agents.delegate");
+    expect(turn.actions[0].params.task).toContain(originalGoal);
+    expect(turn.actions[0].params.task).toContain("A cat walking through a garden");
+    await executeStudioAction(turn.actions[0]);
+    expect(paidJobs).toBe(0);
+    clearActions(); registerActions([{ name: "jobs.submit", description: "Paid job", run: () => { paidJobs++; } }]);
+    await expect(beginStudioAgentTurn("test-key", originalGoal, { mode: "head", board: null })).rejects.toThrow("Hosted-agent delegation is unavailable");
+    expect(modelCalls).toBe(0);
+    expect(paidJobs).toBe(0);
   } finally { globalThis.fetch = original; }
 });
 
